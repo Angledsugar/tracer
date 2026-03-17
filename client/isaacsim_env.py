@@ -71,8 +71,8 @@ class IsaacSimEnv:
             "headless": self.headless,
             "width": 1280,
             "height": 720,
-            "anti_aliasing": 0,              # DLSS 비활성화
-            "renderer": "RayTracedLighting",  # PathTracing 대신 경량 렌더러
+            "anti_aliasing": 0,
+            "renderer": "RasterOnly",  # RTX 레이트레이싱 비활성화 (VRAM 절약)
             "max_gpu_count": 1,
         })
 
