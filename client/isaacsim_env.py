@@ -126,6 +126,10 @@ class IsaacSimEnv:
             self._robot.gripper.joint_opened_positions
         )
 
+        # 카메라 렌더링이 준비될 때까지 몇 스텝 진행
+        for _ in range(20):
+            self._world.step(render=True)
+
         self._initialized = True
         self._use_placeholder = False
         logger.info("Isaac Sim initialized successfully")
@@ -181,6 +185,13 @@ class IsaacSimEnv:
         if not self._use_placeholder:
             # Isaac Sim 카메라에서 RGBA 이미지를 가져와 RGB로 변환
             rgba = self._camera.get_rgba()
+
+            # 카메라가 아직 렌더링되지 않은 경우 빈 프레임 반환
+            h, w = self.camera_resolution
+            if rgba is None or rgba.ndim != 3:
+                logger.warning("Camera not ready, returning blank frame")
+                return np.zeros((h, w, 3), dtype=np.uint8)
+
             return rgba[:, :, :3].astype(np.uint8)
 
         # Placeholder: 간단한 시각화 이미지 생성
