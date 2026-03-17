@@ -90,20 +90,30 @@ class CosmosModelWrapper:
             f"experiment={experiment}, config_file={config_file}"
         )
 
-        # VLMBaseModel (Reason1-7B, ~14GB)을 로딩 단계부터 CPU에 유지
-        # 이 모델이 GPU에 올라가면 VAE+DiT와 합쳐서 ~23GB → OOM
+        # VLMBaseModel (Reason1-7B, ~14GB)의 GPU 할당을 차단
+        # to(), to_empty(), cuda() 호출 시 CUDA → CPU로 리다이렉트
         from cosmos_predict2._src.reason1.models.vlm_base import VLMBaseModel
 
-        _original_vlm_init = VLMBaseModel.__init__
+        _original_vlm_to = VLMBaseModel.to
+        _original_vlm_to_empty = getattr(VLMBaseModel, 'to_empty', None)
 
-        def _patched_vlm_init(self_vlm, *args, **kwargs):
-            _original_vlm_init(self_vlm, *args, **kwargs)
-            # 즉시 CPU로 이동 (GPU에 올라간 직후 바로 내림)
-            self_vlm.to('cpu')
-            torch.cuda.empty_cache()
-            logger.info("VLMBaseModel (Reason1-7B) kept on CPU during loading")
+        def _cpu_redirect_to(self_vlm, *args, **kwargs):
+            if args and 'cuda' in str(args[0]):
+                args = (torch.device('cpu'),) + args[1:]
+            if 'device' in kwargs and 'cuda' in str(kwargs['device']):
+                kwargs['device'] = torch.device('cpu')
+            return _original_vlm_to(self_vlm, *args, **kwargs)
 
-        VLMBaseModel.__init__ = _patched_vlm_init
+        def _cpu_redirect_to_empty(self_vlm, *, device, **kwargs):
+            if 'cuda' in str(device):
+                device = torch.device('cpu')
+                logger.info("VLMBaseModel: redirected to_empty() from CUDA to CPU (~14GB saved)")
+            return _original_vlm_to_empty(self_vlm, device=device, **kwargs)
+
+        VLMBaseModel.to = _cpu_redirect_to
+        VLMBaseModel.cuda = lambda self_vlm, *a, **kw: _cpu_redirect_to(self_vlm, torch.device('cpu'))
+        if _original_vlm_to_empty:
+            VLMBaseModel.to_empty = _cpu_redirect_to_empty
 
         try:
             pipeline = Video2WorldInference(
@@ -113,9 +123,15 @@ class CosmosModelWrapper:
                 context_parallel_size=1,
                 config_file=config_file,
             )
+            torch.cuda.empty_cache()
+            gpu_free = torch.cuda.mem_get_info(self.device)[0] / (1024**3)
+            logger.info(f"Model loaded. GPU available: {gpu_free:.1f} GiB")
         finally:
             os.chdir(original_cwd)
-            VLMBaseModel.__init__ = _original_vlm_init
+            # monkey-patch 원복
+            VLMBaseModel.to = _original_vlm_to
+            if _original_vlm_to_empty:
+                VLMBaseModel.to_empty = _original_vlm_to_empty
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
