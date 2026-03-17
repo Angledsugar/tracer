@@ -89,6 +89,24 @@ class CosmosModelWrapper:
             f"Initializing Video2WorldInference: "
             f"experiment={experiment}, config_file={config_file}"
         )
+
+        # 텍스트 인코더를 로딩 단계부터 CPU에 유지하여 GPU OOM 방지
+        # Video2WorldInference가 모든 컴포넌트를 GPU에 올리면 ~23GB → OOM
+        # 텍스트 인코더(~14GB)를 CPU에 두면 나머지 ~8GB만 GPU 사용
+        from cosmos_predict2._src.predict2.text_encoders import text_encoder as te_module
+
+        _original_te_init = te_module.TextEncoder.__init__
+
+        def _patched_te_init(self_te, *args, **kwargs):
+            _original_te_init(self_te, *args, **kwargs)
+            # 텍스트 인코더의 내부 모델을 즉시 CPU로 이동
+            if hasattr(self_te, 'model') and self_te.model is not None:
+                self_te.model.to('cpu')
+                torch.cuda.empty_cache()
+                logger.info("Text encoder kept on CPU during loading (GPU memory saved)")
+
+        te_module.TextEncoder.__init__ = _patched_te_init
+
         try:
             pipeline = Video2WorldInference(
                 experiment_name=experiment,
@@ -99,6 +117,8 @@ class CosmosModelWrapper:
             )
         finally:
             os.chdir(original_cwd)
+            # monkey-patch 원복
+            te_module.TextEncoder.__init__ = _original_te_init
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
