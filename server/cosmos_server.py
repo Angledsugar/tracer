@@ -69,9 +69,26 @@ class CosmosModelWrapper:
 
     def _load_cosmos_diffusers(self):
         """HuggingFace Diffusers로 모델 로드."""
-        from diffusers import Cosmos2VideoToWorldPipeline
+        import diffusers
 
-        self.pipeline = Cosmos2VideoToWorldPipeline.from_pretrained(
+        # Diffusers 버전에 따라 클래스명이 다름
+        pipeline_cls = None
+        for cls_name in [
+            "Cosmos2VideoToWorldPipeline",
+            "CosmosVideoToWorldPipeline",
+        ]:
+            pipeline_cls = getattr(diffusers, cls_name, None)
+            if pipeline_cls is not None:
+                break
+
+        if pipeline_cls is None:
+            raise ImportError(
+                f"No Cosmos pipeline found in diffusers {diffusers.__version__}. "
+                "Try: uv pip install --upgrade diffusers"
+            )
+
+        logger.info(f"Using {pipeline_cls.__name__} from diffusers {diffusers.__version__}")
+        self.pipeline = pipeline_cls.from_pretrained(
             self.model_path,
             torch_dtype=torch.bfloat16,
         )
