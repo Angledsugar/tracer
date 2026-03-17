@@ -67,7 +67,14 @@ class IsaacSimEnv:
         # SimulationApp은 반드시 다른 omniverse import 전에 생성해야 함
         from isaacsim import SimulationApp
 
-        self._sim_app = SimulationApp({"headless": self.headless})
+        self._sim_app = SimulationApp({
+            "headless": self.headless,
+            "width": 1280,
+            "height": 720,
+            "anti_aliasing": 0,              # DLSS 비활성화
+            "renderer": "RayTracedLighting",  # PathTracing 대신 경량 렌더러
+            "max_gpu_count": 1,
+        })
 
         # SimulationApp 생성 후에만 omniverse 모듈 import 가능
         from isaacsim.core.api import World
