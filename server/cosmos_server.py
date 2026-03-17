@@ -90,22 +90,20 @@ class CosmosModelWrapper:
             f"experiment={experiment}, config_file={config_file}"
         )
 
-        # 텍스트 인코더를 로딩 단계부터 CPU에 유지하여 GPU OOM 방지
-        # Video2WorldInference가 모든 컴포넌트를 GPU에 올리면 ~23GB → OOM
-        # 텍스트 인코더(~14GB)를 CPU에 두면 나머지 ~8GB만 GPU 사용
-        from cosmos_predict2._src.predict2.text_encoders import text_encoder as te_module
+        # VLMBaseModel (Reason1-7B, ~14GB)을 로딩 단계부터 CPU에 유지
+        # 이 모델이 GPU에 올라가면 VAE+DiT와 합쳐서 ~23GB → OOM
+        from cosmos_predict2._src.reason1.models.vlm_base import VLMBaseModel
 
-        _original_te_init = te_module.TextEncoder.__init__
+        _original_vlm_init = VLMBaseModel.__init__
 
-        def _patched_te_init(self_te, *args, **kwargs):
-            _original_te_init(self_te, *args, **kwargs)
-            # 텍스트 인코더의 내부 모델을 즉시 CPU로 이동
-            if hasattr(self_te, 'model') and self_te.model is not None:
-                self_te.model.to('cpu')
-                torch.cuda.empty_cache()
-                logger.info("Text encoder kept on CPU during loading (GPU memory saved)")
+        def _patched_vlm_init(self_vlm, *args, **kwargs):
+            _original_vlm_init(self_vlm, *args, **kwargs)
+            # 즉시 CPU로 이동 (GPU에 올라간 직후 바로 내림)
+            self_vlm.to('cpu')
+            torch.cuda.empty_cache()
+            logger.info("VLMBaseModel (Reason1-7B) kept on CPU during loading")
 
-        te_module.TextEncoder.__init__ = _patched_te_init
+        VLMBaseModel.__init__ = _patched_vlm_init
 
         try:
             pipeline = Video2WorldInference(
@@ -117,8 +115,7 @@ class CosmosModelWrapper:
             )
         finally:
             os.chdir(original_cwd)
-            # monkey-patch 원복
-            te_module.TextEncoder.__init__ = _original_te_init
+            VLMBaseModel.__init__ = _original_vlm_init
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
