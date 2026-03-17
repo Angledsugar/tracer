@@ -79,25 +79,27 @@ class CosmosModelWrapper:
         experiment = setup_args.experiment or checkpoint.experiment
         checkpoint_path = setup_args.checkpoint_path or checkpoint.s3.uri
 
-        # config_file: action-conditioned 전용 설정 (기본 video2world 실험과 별도)
+        # config_file은 상대 경로 유지 (cosmos_predict2 내부에서 모듈로 로드)
+        # cosmos25_repo를 cwd로 설정하여 상대 경로가 올바르게 해석되도록 함
         config_file = setup_args.config_file
+        original_cwd = os.getcwd()
         if self.cosmos25_repo:
-            # 상대 경로를 절대 경로로 변환
-            abs_config = os.path.join(self.cosmos25_repo, config_file)
-            if os.path.exists(abs_config):
-                config_file = abs_config
+            os.chdir(self.cosmos25_repo)
 
         logger.info(
             f"Initializing Video2WorldInference: "
             f"experiment={experiment}, config_file={config_file}"
         )
-        pipeline = Video2WorldInference(
-            experiment_name=experiment,
-            ckpt_path=checkpoint_path,
-            s3_credential_path="",
-            context_parallel_size=1,
-            config_file=config_file,
-        )
+        try:
+            pipeline = Video2WorldInference(
+                experiment_name=experiment,
+                ckpt_path=checkpoint_path,
+                s3_credential_path="",
+                context_parallel_size=1,
+                config_file=config_file,
+            )
+        finally:
+            os.chdir(original_cwd)
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
@@ -153,20 +155,10 @@ class Cosmos25Model:
         if not context_frames:
             return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
 
-        # Action을 numpy 배열로 변환: (chunk_size, 7)
-        actions_array = np.zeros((num_output_frames, 7), dtype=np.float32)
-        if previous_actions:
-            for i, a in enumerate(previous_actions[:num_output_frames]):
-                actions_array[i] = [
-                    a["dx"], a["dy"], a["dz"],
-                    a["drx"], a["dry"], a["drz"],
-                    a["gripper"],
-                ]
-
-        # Context frame → tensor 준비 (Cosmos 2.5 입력 형식)
+        # Context frame → tensor 준비 (이미지만 입력, action 없음)
         img_array = context_frames[-1]  # (H, W, 3) uint8
         img_tensor = torchvision.transforms.functional.to_tensor(img_array).unsqueeze(0)  # (1, 3, H, W)
-        num_video_frames = actions_array.shape[0] + 1
+        num_video_frames = num_output_frames + 1  # 조건 프레임 1 + 생성 프레임 N
 
         # (B, C, T, H, W) 형식의 비디오 입력 생성
         vid_input = torch.cat(
@@ -176,11 +168,14 @@ class Cosmos25Model:
         vid_input = (vid_input * 255.0).to(torch.uint8)
         vid_input = vid_input.unsqueeze(0).permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
 
+        # 빈 action (이미지 + 언어만으로 예측)
+        zero_actions = torch.zeros(num_output_frames, 7)
+
         try:
             video = self._pipeline.generate_vid2world(
                 prompt=language or "",
                 input_path=vid_input,
-                action=torch.from_numpy(actions_array).float(),
+                action=zero_actions,
                 guidance=guidance_scale,
                 num_video_frames=num_video_frames,
                 num_latent_conditional_frames=1,
