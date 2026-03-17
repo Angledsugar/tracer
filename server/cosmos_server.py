@@ -58,14 +58,19 @@ class CosmosModelWrapper:
 
         from cosmos_predict2.action_conditioned_config import (
             ActionConditionedSetupArguments,
+            DEFAULT_MODEL_KEY,
         )
         from cosmos_predict2.action_conditioned import inference as cosmos_inference
 
         # Setup arguments 구성
-        setup_args = ActionConditionedSetupArguments(
-            output_dir="outputs/cosmos25_server",
-            checkpoint_dir=self.model_path if os.path.isdir(self.model_path) else "",
-        )
+        setup_kwargs = {
+            "output_dir": "outputs/cosmos25_server",
+            "model": DEFAULT_MODEL_KEY.name,
+        }
+        if self.model_path and os.path.isdir(self.model_path):
+            setup_kwargs["checkpoint_dir"] = self.model_path
+
+        setup_args = ActionConditionedSetupArguments(**setup_kwargs)
 
         self.model = Cosmos25Model(
             setup_args=setup_args,
