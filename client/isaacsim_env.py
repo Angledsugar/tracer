@@ -49,9 +49,11 @@ class IsaacSimEnv:
         self._initialized = False
         self._use_placeholder = False
 
-        # 예측 프레임 표시용
+        # UI 표시용
         self._prediction_window = None
         self._prediction_provider = None
+        self._camera_window = None
+        self._camera_provider = None
 
         # Placeholder state
         self._ee_pos = np.array([0.4, 0.0, 0.3])
@@ -170,32 +172,64 @@ class IsaacSimEnv:
         logger.info("Isaac Sim initialized successfully")
 
     def _init_prediction_display(self):
-        """Cosmos 예측 프레임을 표시할 omni.ui 창 생성."""
+        """카메라 입력 + Cosmos 예측 프레임을 표시할 omni.ui 창 생성."""
         try:
             import omni.ui as ui
 
             h, w = self.camera_resolution
+            blank = [0] * (w * h * 4)
 
+            # 카메라 입력 이미지 창
+            self._camera_window = ui.Window(
+                "Camera Input", width=w + 20, height=h + 40,
+            )
+            with self._camera_window.frame:
+                with ui.VStack():
+                    ui.Label("Isaac Sim Camera (Context Frame)", height=20)
+                    self._camera_provider = ui.ByteImageProvider()
+                    self._camera_provider.set_bytes_data(blank, [w, h])
+                    ui.ImageWithProvider(
+                        self._camera_provider, width=w, height=h,
+                    )
+
+            # Cosmos 예측 이미지 창
             self._prediction_window = ui.Window(
                 "Cosmos Prediction", width=w + 20, height=h + 40,
             )
             with self._prediction_window.frame:
                 with ui.VStack():
-                    ui.Label("Cosmos Predicted Frames", height=20)
+                    ui.Label("Cosmos Predicted Frame", height=20)
                     self._prediction_provider = ui.ByteImageProvider()
-                    self._prediction_provider.set_bytes_data(
-                        [0] * (w * h * 4), [w, h],
-                    )
+                    self._prediction_provider.set_bytes_data(blank, [w, h])
                     ui.ImageWithProvider(
-                        self._prediction_provider,
-                        width=w, height=h,
+                        self._prediction_provider, width=w, height=h,
                     )
 
-            logger.info("Prediction display window created")
+            logger.info("Display windows created (Camera Input + Cosmos Prediction)")
         except Exception as e:
-            logger.warning(f"Could not create prediction display: {e}")
+            logger.warning(f"Could not create display windows: {e}")
             self._prediction_window = None
             self._prediction_provider = None
+            self._camera_window = None
+            self._camera_provider = None
+
+    def _frame_to_rgba_list(self, frame: np.ndarray) -> tuple[list, int, int]:
+        """RGB numpy 프레임을 omni.ui ByteImageProvider용 RGBA 리스트로 변환."""
+        h, w = frame.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, :3] = frame
+        rgba[:, :, 3] = 255
+        return rgba.flatten().tolist(), w, h
+
+    def _update_camera_display(self, frame: np.ndarray):
+        """카메라 입력 이미지를 UI 창에 표시."""
+        if self._camera_provider is None:
+            return
+        try:
+            data, w, h = self._frame_to_rgba_list(frame)
+            self._camera_provider.set_bytes_data(data, [w, h])
+        except Exception as e:
+            logger.debug(f"Failed to update camera display: {e}")
 
     def show_predicted_frames(self, frames: list[np.ndarray], frame_index: int = 0):
         """
@@ -210,16 +244,8 @@ class IsaacSimEnv:
 
         try:
             frame = frames[min(frame_index, len(frames) - 1)]
-            h, w = frame.shape[:2]
-
-            # RGB → RGBA (omni.ui는 RGBA를 요구)
-            rgba = np.zeros((h, w, 4), dtype=np.uint8)
-            rgba[:, :, :3] = frame
-            rgba[:, :, 3] = 255
-
-            self._prediction_provider.set_bytes_data(
-                rgba.flatten().tolist(), [w, h],
-            )
+            data, w, h = self._frame_to_rgba_list(frame)
+            self._prediction_provider.set_bytes_data(data, [w, h])
         except Exception as e:
             logger.debug(f"Failed to update prediction display: {e}")
 
@@ -311,6 +337,9 @@ class IsaacSimEnv:
                 rgb = (rgba[:, :, :3] * 255).clip(0, 255).astype(np.uint8)
             else:
                 rgb = rgba[:, :, :3].astype(np.uint8)
+
+            # 카메라 입력 창에 표시
+            self._update_camera_display(rgb)
 
             return rgb
 
