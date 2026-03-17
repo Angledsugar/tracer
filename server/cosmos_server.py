@@ -79,14 +79,24 @@ class CosmosModelWrapper:
         experiment = setup_args.experiment or checkpoint.experiment
         checkpoint_path = setup_args.checkpoint_path or checkpoint.s3.uri
 
-        # Video2WorldInference 초기화 (모델 로드)
-        logger.info(f"Initializing Video2WorldInference: experiment={experiment}")
+        # config_file: action-conditioned 전용 설정 (기본 video2world 실험과 별도)
+        config_file = setup_args.config_file
+        if self.cosmos25_repo:
+            # 상대 경로를 절대 경로로 변환
+            abs_config = os.path.join(self.cosmos25_repo, config_file)
+            if os.path.exists(abs_config):
+                config_file = abs_config
+
+        logger.info(
+            f"Initializing Video2WorldInference: "
+            f"experiment={experiment}, config_file={config_file}"
+        )
         pipeline = Video2WorldInference(
             experiment_name=experiment,
             ckpt_path=checkpoint_path,
             s3_credential_path="",
             context_parallel_size=1,
-            config_file=setup_args.config_file,
+            config_file=config_file,
         )
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
