@@ -17,6 +17,19 @@ logger = logging.getLogger(__name__)
 CUBE_SPAWN_POS = np.array([0.4, 0.1, 0.55])
 # 바닥 높이 임계값 (이 아래로 내려가면 리스폰)
 GROUND_THRESHOLD = 0.03
+# Franka 홈 포지션 (팔을 접은 상태, 테이블 충돌 방지)
+# 7 arm joints + 2 finger joints
+FRANKA_HOME_JOINTS = np.array([
+    0.0,       # panda_joint1
+    -0.785,    # panda_joint2 (-π/4, 어깨 뒤로)
+    0.0,       # panda_joint3
+    -2.356,    # panda_joint4 (-3π/4, 팔꿈치 접기)
+    0.0,       # panda_joint5
+    1.571,     # panda_joint6 (π/2, 손목 올리기)
+    0.785,     # panda_joint7 (π/4)
+    0.04,      # panda_finger_joint1 (열림)
+    0.04,      # panda_finger_joint2 (열림)
+])
 
 
 class IsaacSimEnv:
@@ -157,12 +170,12 @@ class IsaacSimEnv:
         # 초기화
         self._world.reset()
         self._camera.initialize()
-        self._robot.gripper.set_joint_positions(
-            self._robot.gripper.joint_opened_positions
-        )
 
-        # 카메라 렌더링이 준비될 때까지 몇 스텝 진행
-        for _ in range(20):
+        # 로봇을 홈 포지션으로 설정 (팔 접기 → 테이블 충돌 방지)
+        self._robot.set_joint_positions(FRANKA_HOME_JOINTS)
+
+        # 물리 안정화 + 카메라 렌더링 준비
+        for _ in range(30):
             self._world.step(render=True)
 
         # UI 설정 (headless가 아닌 경우)
@@ -325,13 +338,12 @@ class IsaacSimEnv:
 
         if not self._use_placeholder:
             self._world.reset()
-            self._robot.gripper.set_joint_positions(
-                self._robot.gripper.joint_opened_positions
-            )
+            # 로봇을 홈 포지션으로 리셋
+            self._robot.set_joint_positions(FRANKA_HOME_JOINTS)
             # 큐브 위치 리셋
             self._respawn_cube()
-            # 시뮬레이션 몇 스텝 진행하여 물리 안정화
-            for _ in range(10):
+            # 물리 안정화
+            for _ in range(20):
                 self._world.step(render=False)
         else:
             self._ee_pos = np.array([0.4, 0.0, 0.3])
