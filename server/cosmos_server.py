@@ -50,48 +50,37 @@ class CosmosModelWrapper:
         self.model = PlaceholderModel(self.device)
 
     def _load_cosmos25(self):
-        """Cosmos Predict 2.5 action-conditioned 모델 로드."""
+        """Cosmos Predict 2.5 base Video2World 모델 로드."""
         import sys
         if self.cosmos25_repo and self.cosmos25_repo not in sys.path:
             sys.path.insert(0, self.cosmos25_repo)
 
-        from cosmos_predict2.action_conditioned_config import (
-            ActionConditionedSetupArguments,
-            DEFAULT_MODEL_KEY,
+        from cosmos_predict2.config import (
+            CommonSetupArguments,
+            MODEL_CHECKPOINTS,
         )
-        from cosmos_predict2.config import MODEL_CHECKPOINTS
         from cosmos_predict2._src.predict2.inference.video2world import (
             Video2WorldInference,
         )
 
-        # Setup arguments 구성
-        setup_kwargs = {
-            "output_dir": "outputs/cosmos25_server",
-            "model": DEFAULT_MODEL_KEY.name,
-        }
+        # Base Video2World 모델 설정
+        setup_args = CommonSetupArguments(
+            output_dir="outputs/cosmos25_server",
+        )
         if self.model_path and os.path.isdir(self.model_path):
-            setup_kwargs["checkpoint_dir"] = self.model_path
+            setup_args.checkpoint_dir = self.model_path
 
-        setup_args = ActionConditionedSetupArguments(**setup_kwargs)
-
-        # 체크포인트 및 실험 설정 해석
         checkpoint = MODEL_CHECKPOINTS[setup_args.model_key]
         experiment = setup_args.experiment or checkpoint.experiment
         checkpoint_path = setup_args.checkpoint_path or checkpoint.s3.uri
 
-        # action-conditioned 전용 config (video2world 기본 config가 아님!)
-        config_file = "cosmos_predict2/_src/predict2/action/configs/action_conditioned/config.py"
         original_cwd = os.getcwd()
         if self.cosmos25_repo:
             os.chdir(self.cosmos25_repo)
 
-        logger.info(
-            f"Initializing Video2WorldInference: "
-            f"experiment={experiment}, config_file={config_file}"
-        )
+        logger.info(f"Initializing Video2WorldInference (base): experiment={experiment}")
 
-        # VLMBaseModel (Reason1-7B, ~14GB)의 GPU 할당을 차단
-        # to(), to_empty(), cuda() 호출 시 CUDA → CPU로 리다이렉트
+        # VLMBaseModel (Reason1-7B, ~14GB)의 GPU 할당을 CPU로 리다이렉트
         from cosmos_predict2._src.reason1.models.vlm_base import VLMBaseModel
 
         _original_vlm_to = VLMBaseModel.to
@@ -121,20 +110,18 @@ class CosmosModelWrapper:
                 ckpt_path=checkpoint_path,
                 s3_credential_path="",
                 context_parallel_size=1,
-                config_file=config_file,
             )
             torch.cuda.empty_cache()
             gpu_free = torch.cuda.mem_get_info(self.device)[0] / (1024**3)
             logger.info(f"Model loaded. GPU available: {gpu_free:.1f} GiB")
         finally:
             os.chdir(original_cwd)
-            # monkey-patch 원복
             VLMBaseModel.to = _original_vlm_to
             if _original_vlm_to_empty:
                 VLMBaseModel.to_empty = _original_vlm_to_empty
 
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
-        logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
+        logger.info("Cosmos Predict 2.5 base Video2World model loaded")
 
     def predict(
         self,
@@ -254,29 +241,17 @@ class Cosmos25Model:
         if not context_frames:
             return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
 
-        # Context frame → tensor 준비 (이미지만 입력, action 없음)
+        # Context frame을 PIL Image로 저장하여 파이프라인에 전달
+        from PIL import Image as PILImage
         img_array = context_frames[-1]  # (H, W, 3) uint8
-        img_tensor = torchvision.transforms.functional.to_tensor(img_array).unsqueeze(0)  # (1, 3, H, W)
-        num_video_frames = num_output_frames + 1  # 조건 프레임 1 + 생성 프레임 N
-
-        # (B, C, T, H, W) 형식의 비디오 입력 생성
-        vid_input = torch.cat(
-            [img_tensor, torch.zeros_like(img_tensor).repeat(num_video_frames - 1, 1, 1, 1)],
-            dim=0,
-        )
-        vid_input = (vid_input * 255.0).to(torch.uint8)
-        vid_input = vid_input.unsqueeze(0).permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
-
-        # 빈 action (이미지 + 언어만으로 예측)
-        zero_actions = torch.zeros(num_output_frames, 7)
+        tmp_path = "/tmp/_cosmos_input_frame.jpg"
+        PILImage.fromarray(img_array).save(tmp_path, quality=95)
 
         try:
             video = self._pipeline.generate_vid2world(
                 prompt=language or "",
-                input_path=vid_input,
-                action=zero_actions,
+                input_path=tmp_path,
                 guidance=guidance_scale,
-                num_video_frames=num_video_frames,
                 num_latent_conditional_frames=1,
                 resolution="none",
                 seed=seed,
