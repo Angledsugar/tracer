@@ -210,7 +210,11 @@ class LeapfrogController:
             frame, proprio = self.get_observation()
             self._update_context(frame)
 
-            # 2. 현재 action 실행
+            # 2. 추론 완료 시 action 교체 (새 추론 시작 전에 먼저 체크)
+            if not self.state.is_inferencing and self.state.pending_actions:
+                self._swap_actions()
+
+            # 3. 현재 action 실행
             if self.state.action_index < len(self.state.current_actions):
                 action = self.state.current_actions[self.state.action_index]
                 self.execute_action(action)
@@ -218,16 +222,12 @@ class LeapfrogController:
             else:
                 logger.warning("Action buffer empty - holding position")
 
-            # 3. 실행 프레임 소진 시 다음 추론 시작
+            # 4. 실행 프레임 소진 시 다음 추론 시작
             if (
                 self.state.action_index >= self.config.execute_frames
                 and not self.state.is_inferencing
             ):
                 self._request_inference_async()
-
-            # 4. 추론 완료 시 action 교체
-            if not self.state.is_inferencing and self.state.pending_actions:
-                self._swap_actions()
 
             self.state.step_count += 1
 
