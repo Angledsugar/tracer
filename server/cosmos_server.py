@@ -40,13 +40,14 @@ class CosmosModelWrapper:
 
         try:
             self._load_cosmos_native()
-        except ImportError:
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"Native cosmos_predict2 failed: {e}")
             try:
                 self._load_cosmos_diffusers()
-            except ImportError:
+            except (ImportError, AttributeError) as e:
                 logger.warning(
-                    "Cosmos not available - using placeholder model. "
-                    "Install cosmos-predict2 or diffusers to use the real model."
+                    f"Diffusers also failed: {e}. "
+                    "Using placeholder model."
                 )
                 self.model = PlaceholderModel(self.device)
 
