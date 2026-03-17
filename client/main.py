@@ -27,8 +27,8 @@ def main():
                         help="Isaac Sim task name")
     parser.add_argument("--language", type=str, default="pick up the red block",
                         help="Language instruction for the task")
-    parser.add_argument("--max-steps", type=int, default=1000,
-                        help="Maximum control steps")
+    parser.add_argument("--max-steps", type=int, default=0,
+                        help="Maximum control steps (0 = unlimited)")
     parser.add_argument("--control-hz", type=float, default=20.0,
                         help="Robot control frequency")
     parser.add_argument("--headless", action="store_true",
@@ -90,7 +90,7 @@ def main():
     # 6. 실행
     logger.info("Starting DVA Leapfrog control loop...")
     try:
-        controller.run(max_steps=args.max_steps)
+        controller.run(max_steps=args.max_steps or None)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     finally:

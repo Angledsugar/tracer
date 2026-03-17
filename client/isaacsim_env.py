@@ -163,13 +163,27 @@ class IsaacSimEnv:
         for _ in range(20):
             self._world.step(render=True)
 
-        # 예측 프레임 표시 창 생성 (headless가 아닌 경우)
+        # UI 설정 (headless가 아닌 경우)
         if not self.headless:
             self._init_prediction_display()
+            self._init_camera_viewport()
 
         self._initialized = True
         self._use_placeholder = False
         logger.info("Isaac Sim initialized successfully")
+
+    def _init_camera_viewport(self):
+        """메인 viewport의 활성 카메라를 /World/Camera로 설정."""
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            viewport = get_active_viewport()
+            if viewport:
+                viewport.set_active_camera("/World/Camera")
+                logger.info("Viewport active camera set to /World/Camera")
+            else:
+                logger.warning("No active viewport found")
+        except Exception as e:
+            logger.warning(f"Could not set viewport camera: {e}")
 
     def _init_prediction_display(self):
         """카메라 입력 + Cosmos 예측 프레임을 표시할 omni.ui 창 생성."""
