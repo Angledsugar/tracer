@@ -52,7 +52,6 @@ class CosmosModelWrapper:
     def _load_cosmos25(self):
         """Cosmos Predict 2.5 action-conditioned 모델 로드."""
         import sys
-        # cosmos-predict2.5 저장소를 Python path에 추가
         if self.cosmos25_repo and self.cosmos25_repo not in sys.path:
             sys.path.insert(0, self.cosmos25_repo)
 
@@ -60,7 +59,10 @@ class CosmosModelWrapper:
             ActionConditionedSetupArguments,
             DEFAULT_MODEL_KEY,
         )
-        from cosmos_predict2.action_conditioned import inference as cosmos_inference
+        from cosmos_predict2.config import MODEL_CHECKPOINTS
+        from cosmos_predict2._src.predict2.inference.video2world import (
+            Video2WorldInference,
+        )
 
         # Setup arguments 구성
         setup_kwargs = {
@@ -72,12 +74,22 @@ class CosmosModelWrapper:
 
         setup_args = ActionConditionedSetupArguments(**setup_kwargs)
 
-        self.model = Cosmos25Model(
-            setup_args=setup_args,
-            cosmos_inference_fn=cosmos_inference,
-            device=self.device,
-            cosmos25_repo=self.cosmos25_repo,
+        # 체크포인트 및 실험 설정 해석
+        checkpoint = MODEL_CHECKPOINTS[setup_args.model_key]
+        experiment = setup_args.experiment or checkpoint.experiment
+        checkpoint_path = setup_args.checkpoint_path or checkpoint.s3.uri
+
+        # Video2WorldInference 초기화 (모델 로드)
+        logger.info(f"Initializing Video2WorldInference: experiment={experiment}")
+        pipeline = Video2WorldInference(
+            experiment_name=experiment,
+            ckpt_path=checkpoint_path,
+            s3_credential_path="",
+            context_parallel_size=1,
+            config_file=setup_args.config_file,
         )
+
+        self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
 
     def predict(
@@ -109,29 +121,12 @@ class CosmosModelWrapper:
 class Cosmos25Model:
     """Cosmos Predict 2.5 action-conditioned 모델.
 
-    cosmos-predict2.5 저장소의 inference API를 직접 호출합니다.
+    Video2WorldInference.generate_vid2world()를 직접 호출합니다.
     """
 
-    def __init__(self, setup_args, cosmos_inference_fn, device: str, cosmos25_repo: str):
-        self.setup_args = setup_args
-        self.cosmos_inference_fn = cosmos_inference_fn
+    def __init__(self, pipeline, device: str):
+        self._pipeline = pipeline
         self.device = device
-        self.cosmos25_repo = cosmos25_repo
-        self._pipeline = None
-
-    def _ensure_pipeline(self):
-        """Lazy loading: 첫 predict 호출 시 파이프라인 초기화."""
-        if self._pipeline is not None:
-            return
-
-        import sys
-        if self.cosmos25_repo and self.cosmos25_repo not in sys.path:
-            sys.path.insert(0, self.cosmos25_repo)
-
-        from cosmos_predict2._src.predict2.action.action_inference import Video2WorldCLI
-
-        self._pipeline = Video2WorldCLI(self.setup_args)
-        logger.info("Cosmos 2.5 pipeline initialized")
 
     def predict(
         self,
@@ -143,13 +138,12 @@ class Cosmos25Model:
         num_denoise_steps: int,
         seed: int,
     ) -> list[np.ndarray]:
-        try:
-            self._ensure_pipeline()
-        except Exception as e:
-            logger.warning(f"Pipeline init failed ({e}), using simple fallback")
-            return self._fallback_predict(context_frames, num_output_frames, seed)
+        import torchvision
 
-        # Action을 numpy 배열로 변환: (T, 7)
+        if not context_frames:
+            return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
+
+        # Action을 numpy 배열로 변환: (chunk_size, 7)
         actions_array = np.zeros((num_output_frames, 7), dtype=np.float32)
         if previous_actions:
             for i, a in enumerate(previous_actions[:num_output_frames]):
@@ -159,58 +153,68 @@ class Cosmos25Model:
                     a["gripper"],
                 ]
 
-        # Context frame 준비
-        if not context_frames:
-            return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
+        # Context frame → tensor 준비 (Cosmos 2.5 입력 형식)
+        img_array = context_frames[-1]  # (H, W, 3) uint8
+        img_tensor = torchvision.transforms.functional.to_tensor(img_array).unsqueeze(0)  # (1, 3, H, W)
+        num_video_frames = actions_array.shape[0] + 1
 
-        initial_frame = context_frames[-1]
+        # (B, C, T, H, W) 형식의 비디오 입력 생성
+        vid_input = torch.cat(
+            [img_tensor, torch.zeros_like(img_tensor).repeat(num_video_frames - 1, 1, 1, 1)],
+            dim=0,
+        )
+        vid_input = (vid_input * 255.0).to(torch.uint8)
+        vid_input = vid_input.unsqueeze(0).permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
 
         try:
-            # Cosmos 2.5 generate
-            generated_video = self._pipeline.generate_vid2world(
-                conditioned_frames=initial_frame,
-                actions=actions_array,
+            video = self._pipeline.generate_vid2world(
+                prompt=language or "",
+                input_path=vid_input,
+                action=torch.from_numpy(actions_array).float(),
                 guidance=guidance_scale,
-                num_steps=num_denoise_steps,
+                num_video_frames=num_video_frames,
+                num_latent_conditional_frames=1,
+                resolution="none",
                 seed=seed,
+                negative_prompt="The video captures a series of frames showing ugly scenes.",
+                num_steps=num_denoise_steps,
             )
 
-            # 출력을 프레임 리스트로 변환
-            return self._video_to_frames(generated_video, num_output_frames)
+            return self._video_to_frames(video, num_output_frames)
 
         except Exception as e:
             logger.error(f"Cosmos 2.5 inference failed: {e}")
             return self._fallback_predict(context_frames, num_output_frames, seed)
 
     def _video_to_frames(self, video, num_output_frames: int) -> list[np.ndarray]:
-        """비디오 텐서/배열을 프레임 리스트로 변환."""
+        """비디오 텐서를 프레임 리스트로 변환. 출력 범위: [-1, 1] → [0, 255]."""
         if isinstance(video, torch.Tensor):
-            video = video.cpu()
-            if video.ndim == 4:  # (T, C, H, W)
-                frames = []
-                for i in range(min(video.shape[0], num_output_frames)):
-                    frame = video[i].permute(1, 2, 0).numpy()
-                    if frame.max() <= 1.0:
-                        frame = (frame * 255).clip(0, 255)
-                    frames.append(frame.astype(np.uint8))
-                return frames
-            elif video.ndim == 5:  # (B, T, C, H, W)
-                return self._video_to_frames(video[0], num_output_frames)
+            video = video.cpu().float()
+
+            # (B, C, T, H, W) → (T, C, H, W)
+            if video.ndim == 5:
+                video = video[0]  # batch 제거
+            if video.ndim == 4 and video.shape[0] == 3:
+                # (C, T, H, W) → (T, C, H, W)
+                video = video.permute(1, 0, 2, 3)
+
+            # [-1, 1] → [0, 1]
+            video_normalized = (video - video.min()) / (video.max() - video.min() + 1e-8)
+
+            frames = []
+            # 첫 프레임은 조건 프레임이므로 건너뜀
+            start = 1 if video_normalized.shape[0] > num_output_frames else 0
+            for i in range(start, min(video_normalized.shape[0], start + num_output_frames)):
+                frame = video_normalized[i].permute(1, 2, 0).numpy()  # (H, W, C)
+                frame = (frame * 255).clip(0, 255).astype(np.uint8)
+                frames.append(frame)
+            return frames
 
         if isinstance(video, np.ndarray):
-            if video.ndim == 4:  # (T, H, W, C) or (T, C, H, W)
-                frames = []
-                for i in range(min(video.shape[0], num_output_frames)):
-                    frame = video[i]
-                    if frame.shape[0] == 3:  # (C, H, W) → (H, W, C)
-                        frame = np.transpose(frame, (1, 2, 0))
-                    if frame.max() <= 1.0:
-                        frame = (frame * 255).clip(0, 255)
-                    frames.append(frame.astype(np.uint8))
-                return frames
-
-        if isinstance(video, list):
-            return [np.array(f).astype(np.uint8) for f in video[:num_output_frames]]
+            video_norm = (video - video.min()) / (video.max() - video.min() + 1e-8)
+            video_uint8 = (video_norm * 255).clip(0, 255).astype(np.uint8)
+            if video_uint8.ndim == 4:
+                return [video_uint8[i] for i in range(min(video_uint8.shape[0], num_output_frames))]
 
         return self._fallback_predict([], num_output_frames, 42)
 
