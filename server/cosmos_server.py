@@ -100,6 +100,21 @@ class CosmosModelWrapper:
         finally:
             os.chdir(original_cwd)
 
+        # 텍스트 인코더를 CPU로 오프로드하여 GPU 메모리 확보 (~14GB 절약)
+        # 텍스트 인코딩은 CPU에서 수행하고, 디노이징만 GPU에서 실행
+        try:
+            if hasattr(pipeline, 'model') and hasattr(pipeline.model, 'conditioner'):
+                conditioner = pipeline.model.conditioner
+                for embedder in conditioner.embedders:
+                    if hasattr(embedder, 'model'):
+                        embedder.model.to('cpu')
+                        logger.info(f"Offloaded embedder '{type(embedder).__name__}' to CPU")
+            torch.cuda.empty_cache()
+            gpu_free = torch.cuda.mem_get_info(self.device)[0] / (1024**3)
+            logger.info(f"GPU memory freed after offload: {gpu_free:.1f} GiB available")
+        except Exception as e:
+            logger.warning(f"Could not offload text encoder: {e}")
+
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
 
