@@ -291,7 +291,13 @@ class IsaacSimEnv:
                 logger.warning("Camera not ready, returning blank frame")
                 return np.zeros((h, w, 3), dtype=np.uint8)
 
-            return rgba[:, :, :3].astype(np.uint8)
+            # float (0~1) → uint8 (0~255) 변환
+            if rgba.dtype in (np.float32, np.float64):
+                rgb = (rgba[:, :, :3] * 255).clip(0, 255).astype(np.uint8)
+            else:
+                rgb = rgba[:, :, :3].astype(np.uint8)
+
+            return rgb
 
         # Placeholder: 간단한 시각화 이미지 생성
         h, w = self.camera_resolution
