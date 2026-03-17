@@ -100,21 +100,6 @@ class CosmosModelWrapper:
         finally:
             os.chdir(original_cwd)
 
-        # 텍스트 인코더를 CPU로 오프로드하여 GPU 메모리 확보 (~14GB 절약)
-        # 텍스트 인코딩은 CPU에서 수행하고, 디노이징만 GPU에서 실행
-        try:
-            if hasattr(pipeline, 'model') and hasattr(pipeline.model, 'conditioner'):
-                conditioner = pipeline.model.conditioner
-                for embedder in conditioner.embedders:
-                    if hasattr(embedder, 'model'):
-                        embedder.model.to('cpu')
-                        logger.info(f"Offloaded embedder '{type(embedder).__name__}' to CPU")
-            torch.cuda.empty_cache()
-            gpu_free = torch.cuda.mem_get_info(self.device)[0] / (1024**3)
-            logger.info(f"GPU memory freed after offload: {gpu_free:.1f} GiB available")
-        except Exception as e:
-            logger.warning(f"Could not offload text encoder: {e}")
-
         self.model = Cosmos25Model(pipeline=pipeline, device=self.device)
         logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
 
@@ -147,12 +132,79 @@ class CosmosModelWrapper:
 class Cosmos25Model:
     """Cosmos Predict 2.5 action-conditioned 모델.
 
-    Video2WorldInference.generate_vid2world()를 직접 호출합니다.
+    텍스트 임베딩을 한번 계산/캐싱 후 텍스트 인코더(~14GB)를 해제하여
+    24GB GPU에서도 추론 가능하게 합니다.
     """
 
     def __init__(self, pipeline, device: str):
         self._pipeline = pipeline
         self.device = device
+        self._cached_text_emb = None
+        self._cached_neg_text_emb = None
+        self._text_encoder_freed = False
+
+    def cache_prompt_and_free_encoder(
+        self, prompt: str, negative_prompt: str = "The video captures a series of frames showing ugly scenes."
+    ):
+        """프롬프트 임베딩을 캐싱하고 텍스트 인코더를 GPU에서 완전 해제."""
+        if self._text_encoder_freed:
+            return
+
+        text_encoder = self._pipeline.model.text_encoder
+        if text_encoder is None:
+            logger.warning("No text encoder found, skipping cache")
+            return
+
+        logger.info(f"Computing text embedding for: '{prompt}'")
+
+        # 1. 텍스트 임베딩 계산 (GPU에서)
+        self._cached_text_emb = text_encoder.compute_text_embeddings_online(
+            data_batch={"ai_caption": [prompt], "images": None},
+            input_caption_key="ai_caption",
+        )
+        self._cached_neg_text_emb = text_encoder.compute_text_embeddings_online(
+            data_batch={"ai_caption": [negative_prompt], "images": None},
+            input_caption_key="ai_caption",
+        )
+
+        # GPU에 유지 (추론 시 사용)
+        self._cached_text_emb = self._cached_text_emb.cuda().to(torch.bfloat16)
+        self._cached_neg_text_emb = self._cached_neg_text_emb.cuda().to(torch.bfloat16)
+
+        logger.info(f"Cached text embedding shape: {self._cached_text_emb.shape}")
+
+        # 2. 텍스트 인코더 완전 해제
+        param_gb = sum(
+            p.numel() * p.element_size() for p in text_encoder.parameters()
+        ) / (1024**3)
+
+        self._pipeline.model.text_encoder = None
+        del text_encoder
+        torch.cuda.empty_cache()
+
+        gpu_free = torch.cuda.mem_get_info(self.device)[0] / (1024**3)
+        logger.info(f"Freed text encoder (~{param_gb:.1f} GB). GPU available: {gpu_free:.1f} GiB")
+
+        # 3. get_text_embedding을 monkey-patch하여 캐싱된 임베딩 반환
+        #    generate_vid2world()에서 text_encoder가 None이면
+        #    get_text_embedding(prompt)을 호출함 → 캐싱된 값 반환
+        cached_emb = self._cached_text_emb
+        cached_neg_emb = self._cached_neg_text_emb
+
+        import cosmos_predict2._src.predict2.inference.video2world as v2w_module
+        original_get_text_embedding = v2w_module.get_text_embedding
+
+        def _cached_get_text_embedding(text):
+            """캐싱된 텍스트 임베딩을 반환."""
+            logger.debug(f"Using cached embedding for: '{text[:50]}...'")
+            if "ugly" in text.lower() or "static" in text.lower():
+                return cached_neg_emb
+            return cached_emb
+
+        v2w_module.get_text_embedding = _cached_get_text_embedding
+        logger.info("Patched get_text_embedding with cached embeddings")
+
+        self._text_encoder_freed = True
 
     def predict(
         self,
@@ -411,6 +463,7 @@ def serve(
     device: str = "cuda:0",
     save_dir: str = "",
     cosmos25_repo: str = "",
+    prompt: str = "",
 ):
     """Start the gRPC server."""
     logging.basicConfig(level=logging.INFO)
@@ -418,6 +471,10 @@ def serve(
     model = CosmosModelWrapper(
         model_path=model_path, device=device, cosmos25_repo=cosmos25_repo,
     )
+
+    # 프롬프트 캐싱 + 텍스트 인코더 해제 (~14GB GPU 메모리 확보)
+    if prompt and hasattr(model.model, 'cache_prompt_and_free_encoder'):
+        model.model.cache_prompt_and_free_encoder(prompt)
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=max_workers),
         options=[
@@ -447,11 +504,14 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--save-dir", type=str, default="",
                         help="Directory to save predicted frames (empty = disabled)")
+    parser.add_argument("--prompt", type=str, default="",
+                        help="Fixed prompt to cache (frees text encoder ~14GB after caching)")
     args = parser.parse_args()
 
     serve(
         model_path=args.model_path, host=args.host, port=args.port,
         device=args.device, save_dir=args.save_dir, cosmos25_repo=args.cosmos25_repo,
+        prompt=args.prompt,
     )
 
 
