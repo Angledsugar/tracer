@@ -79,9 +79,8 @@ class CosmosModelWrapper:
         experiment = setup_args.experiment or checkpoint.experiment
         checkpoint_path = setup_args.checkpoint_path or checkpoint.s3.uri
 
-        # config_file은 상대 경로 유지 (cosmos_predict2 내부에서 모듈로 로드)
-        # cosmos25_repo를 cwd로 설정하여 상대 경로가 올바르게 해석되도록 함
-        config_file = setup_args.config_file
+        # action-conditioned 전용 config (video2world 기본 config가 아님!)
+        config_file = "cosmos_predict2/_src/predict2/action/configs/action_conditioned/config.py"
         original_cwd = os.getcwd()
         if self.cosmos25_repo:
             os.chdir(self.cosmos25_repo)
