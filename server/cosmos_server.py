@@ -66,6 +66,7 @@ class CosmosModelWrapper:
         # Base Video2World 모델 설정
         setup_args = CommonSetupArguments(
             output_dir="outputs/cosmos25_server",
+            model="2B/post-trained",
         )
         if self.model_path and os.path.isdir(self.model_path):
             setup_args.checkpoint_dir = self.model_path
