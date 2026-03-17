@@ -7,12 +7,9 @@ import argparse
 import logging
 import torch
 
-from cosmos_client import CosmosClient
-from leapfrog_controller import LeapfrogController, LeapfrogConfig
-from isaacsim_env import IsaacSimEnv
-
-import sys
-sys.path.append("..")
+from client.cosmos_client import CosmosClient
+from client.leapfrog_controller import LeapfrogController, LeapfrogConfig
+from client.isaacsim_env import IsaacSimEnv
 from models.inverse_dynamics import InverseDynamicsModel
 
 logging.basicConfig(

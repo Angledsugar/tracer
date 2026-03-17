@@ -1,7 +1,6 @@
-reference/
-review/
 .claude/
 __pycache__/
 *.pyc
 *.egg-info/
 .env
+.venv/

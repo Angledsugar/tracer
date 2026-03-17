@@ -1,6 +1,10 @@
 """
 Isaac Sim Environment Wrapper
 Isaac Sim과 DVA 파이프라인을 연결하는 인터페이스
+
+Isaac Sim Core API (4.5/5.x)를 사용하여
+Franka 로봇 + 카메라 + Pick-and-Place 씬을 구성합니다.
+Isaac Sim이 설치되지 않은 환경에서는 placeholder로 동작합니다.
 """
 
 import logging
@@ -16,9 +20,6 @@ class IsaacSimEnv:
 
     Isaac Sim에서 로봇 시뮬레이션을 실행하고,
     DVA 파이프라인에 필요한 관찰/행동 인터페이스를 제공합니다.
-
-    NOTE: 실제 Isaac Sim API 호출은 Isaac Sim이 설치된 환경에서
-    omni.isaac 모듈을 import하여 사용합니다.
     """
 
     def __init__(
@@ -35,48 +36,107 @@ class IsaacSimEnv:
         self.control_mode = control_mode
         self.headless = headless
 
-        self._sim = None
+        self._sim_app = None
+        self._world = None
         self._robot = None
         self._camera = None
+        self._target_cube = None
         self._initialized = False
+        self._use_placeholder = False
+
+        # Placeholder state
+        self._ee_pos = np.array([0.4, 0.0, 0.3])
+        self._ee_rot = np.array([0.0, 0.0, 0.0])
+        self._gripper_state = 0.0
 
     def initialize(self):
         """Isaac Sim 환경 초기화."""
         logger.info(f"Initializing Isaac Sim: task={self.task_name}, robot={self.robot_type}")
 
         try:
-            # Isaac Sim imports - only available in Isaac Sim environment
-            from isaacsim import SimulationApp
-            simulation_app = SimulationApp({"headless": self.headless})
-
-            import omni.isaac.core as isaac_core
-            from omni.isaac.core import World
-            from omni.isaac.core.robots import Robot
-
-            self._sim = World(stage_units_in_meters=1.0)
-
-            # TODO: Load specific task scene and robot
-            # This depends on the task configuration
-            # self._setup_scene()
-            # self._setup_robot()
-            # self._setup_camera()
-
-            self._initialized = True
-            logger.info("Isaac Sim initialized successfully")
-
-        except ImportError:
+            self._init_isaac_sim()
+        except ImportError as e:
             logger.warning(
-                "Isaac Sim not available - using placeholder environment. "
+                f"Isaac Sim not available ({e}) - using placeholder environment. "
                 "Install Isaac Sim to use the real simulator."
             )
             self._init_placeholder()
 
+    def _init_isaac_sim(self):
+        """실제 Isaac Sim 환경 초기화."""
+        # SimulationApp은 반드시 다른 omniverse import 전에 생성해야 함
+        from isaacsim import SimulationApp
+
+        self._sim_app = SimulationApp({"headless": self.headless})
+
+        # SimulationApp 생성 후에만 omniverse 모듈 import 가능
+        from isaacsim.core.api import World
+        from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+        from isaacsim.robot.manipulators.examples.franka import Franka
+        from isaacsim.sensors.camera import Camera
+        import isaacsim.core.utils.numpy.rotations as rot_utils
+
+        # World 생성
+        self._world = World(stage_units_in_meters=1.0)
+        self._world.scene.add_default_ground_plane()
+
+        # Franka 로봇 추가
+        self._robot = self._world.scene.add(
+            Franka(prim_path="/World/Franka", name="franka")
+        )
+
+        # 테이블 추가
+        self._world.scene.add(
+            FixedCuboid(
+                prim_path="/World/Table",
+                name="table",
+                position=np.array([0.4, 0.0, 0.25]),
+                scale=np.array([0.6, 0.8, 0.5]),
+                color=np.array([0.5, 0.3, 0.15]),
+            )
+        )
+
+        # 타겟 큐브 추가 (pick-and-place 대상)
+        self._target_cube = self._world.scene.add(
+            DynamicCuboid(
+                prim_path="/World/TargetCube",
+                name="target_cube",
+                position=np.array([0.4, 0.1, 0.55]),
+                scale=np.array([0.04, 0.04, 0.04]),
+                color=np.array([1.0, 0.0, 0.0]),
+            )
+        )
+
+        # 카메라 설정 (로봇 어깨 뒤에서 바라보는 3인칭 시점)
+        h, w = self.camera_resolution
+        self._camera = Camera(
+            prim_path="/World/Camera",
+            position=np.array([1.0, 0.0, 1.0]),
+            frequency=20,
+            resolution=(w, h),
+            orientation=rot_utils.euler_angles_to_quats(
+                np.array([0, 45, 180]), degrees=True
+            ),
+        )
+
+        # 초기화
+        self._world.reset()
+        self._camera.initialize()
+        self._robot.gripper.set_joint_positions(
+            self._robot.gripper.joint_opened_positions
+        )
+
+        self._initialized = True
+        self._use_placeholder = False
+        logger.info("Isaac Sim initialized successfully")
+
     def _init_placeholder(self):
         """Isaac Sim 없이 개발/테스트용 플레이스홀더."""
         self._initialized = True
-        self._ee_pos = np.array([0.4, 0.0, 0.3])    # end-effector position
-        self._ee_rot = np.array([0.0, 0.0, 0.0])     # end-effector rotation (euler)
-        self._gripper_state = 0.0                      # 0: open, 1: closed
+        self._use_placeholder = True
+        self._ee_pos = np.array([0.4, 0.0, 0.3])
+        self._ee_rot = np.array([0.0, 0.0, 0.0])
+        self._gripper_state = 0.0
         logger.info("Placeholder environment initialized")
 
     def reset(self, seed: Optional[int] = None) -> tuple[np.ndarray, np.ndarray]:
@@ -89,12 +149,18 @@ class IsaacSimEnv:
         if not self._initialized:
             self.initialize()
 
-        if self._sim:
-            self._sim.reset()
-
-        self._ee_pos = np.array([0.4, 0.0, 0.3])
-        self._ee_rot = np.array([0.0, 0.0, 0.0])
-        self._gripper_state = 0.0
+        if not self._use_placeholder:
+            self._world.reset()
+            self._robot.gripper.set_joint_positions(
+                self._robot.gripper.joint_opened_positions
+            )
+            # 시뮬레이션 몇 스텝 진행하여 물리 안정화
+            for _ in range(10):
+                self._world.step(render=False)
+        else:
+            self._ee_pos = np.array([0.4, 0.0, 0.3])
+            self._ee_rot = np.array([0.0, 0.0, 0.0])
+            self._gripper_state = 0.0
 
         return self.get_observation()
 
@@ -112,10 +178,10 @@ class IsaacSimEnv:
 
     def _get_camera_image(self) -> np.ndarray:
         """카메라 이미지 캡처."""
-        if self._camera:
-            # Isaac Sim camera
-            # return self._camera.get_rgba()[:, :, :3]
-            pass
+        if not self._use_placeholder:
+            # Isaac Sim 카메라에서 RGBA 이미지를 가져와 RGB로 변환
+            rgba = self._camera.get_rgba()
+            return rgba[:, :, :3].astype(np.uint8)
 
         # Placeholder: 간단한 시각화 이미지 생성
         h, w = self.camera_resolution
@@ -124,23 +190,47 @@ class IsaacSimEnv:
         # 배경
         frame[:, :] = [40, 40, 60]
 
-        # 테이블 (간단한 사각형)
-        frame[h//2:, w//4:3*w//4] = [139, 90, 43]
+        # 테이블 (갈색 사각형)
+        frame[h // 2:, w // 4:3 * w // 4] = [139, 90, 43]
 
         # End-effector 위치를 이미지에 표시
         px = int((self._ee_pos[0] - 0.2) / 0.4 * w)
         py = int((1.0 - (self._ee_pos[2] - 0.0) / 0.6) * h)
-        px = np.clip(px, 5, w-5)
-        py = np.clip(py, 5, h-5)
+        px = np.clip(px, 5, w - 5)
+        py = np.clip(py, 5, h - 5)
 
-        # 그리퍼 표시
+        # 그리퍼 색상: 빨간색(닫힘) / 초록색(열림)
         color = [255, 0, 0] if self._gripper_state > 0.5 else [0, 255, 0]
-        frame[py-4:py+4, px-4:px+4] = color
+        frame[py - 4:py + 4, px - 4:px + 4] = color
+
+        # 타겟 큐브 (빨간 블록) 표시
+        cube_px = int((0.4 - 0.2) / 0.4 * w)
+        cube_py = int((1.0 - (0.55 - 0.0) / 0.6) * h)
+        cube_px = np.clip(cube_px, 8, w - 8)
+        cube_py = np.clip(cube_py, 8, h - 8)
+        frame[cube_py - 6:cube_py + 6, cube_px - 6:cube_px + 6] = [200, 30, 30]
 
         return frame
 
     def _get_proprioception(self) -> np.ndarray:
-        """로봇 고유수용감각 반환."""
+        """로봇 고유수용감각 (end-effector pose + gripper state) 반환."""
+        if not self._use_placeholder:
+            # End-effector 위치/자세
+            ee_pos, ee_quat = self._robot.end_effector.get_world_pose()
+
+            # Quaternion → Euler angles (roll, pitch, yaw)
+            import isaacsim.core.utils.numpy.rotations as rot_utils
+            ee_euler = rot_utils.quats_to_euler_angles(ee_quat.reshape(1, 4))[0]
+
+            # Gripper 상태: 열린 정도를 0~1로 정규화
+            gripper_pos = self._robot.gripper.get_joint_positions()
+            open_pos = self._robot.gripper.joint_opened_positions
+            gripper_normalized = float(np.mean(gripper_pos) / np.mean(open_pos))
+            # 0 = 닫힘, 1 = 열림 → 반전하여 1 = 닫힘으로 통일
+            gripper_state = 1.0 - np.clip(gripper_normalized, 0.0, 1.0)
+
+            return np.concatenate([ee_pos, ee_euler, [gripper_state]])
+
         return np.concatenate([
             self._ee_pos,
             self._ee_rot,
@@ -149,48 +239,106 @@ class IsaacSimEnv:
 
     def execute_action(self, action: np.ndarray):
         """
-        로봇 행동 실행.
+        End-effector delta 명령으로 로봇 행동 실행.
 
         Args:
             action: [7] (dx, dy, dz, drx, dry, drz, gripper)
+                    - dx/dy/dz: end-effector 위치 변화량
+                    - drx/dry/drz: end-effector 회전 변화량 (euler)
+                    - gripper: > 0.5이면 닫힘, ≤ 0.5이면 열림
         """
-        if self._sim:
-            # Isaac Sim robot control
-            # self._robot.apply_action(action)
-            # self._sim.step()
-            pass
+        if not self._use_placeholder:
+            self._execute_action_isaac(action)
+            return
 
         # Placeholder: 직접 상태 업데이트
-        self._ee_pos += action[:3] * 0.01   # scale down for safety
+        self._ee_pos += action[:3] * 0.01
         self._ee_rot += action[3:6] * 0.01
         self._gripper_state = float(action[6] > 0.5)
 
         # 작업 공간 제한
         self._ee_pos = np.clip(self._ee_pos, [0.1, -0.3, 0.0], [0.7, 0.3, 0.6])
 
+    def _execute_action_isaac(self, action: np.ndarray):
+        """Isaac Sim에서 delta end-effector 명령 실행."""
+        from isaacsim.robot.manipulators.examples.franka.controllers import (
+            RMPFlowController,
+        )
+        import isaacsim.core.utils.numpy.rotations as rot_utils
+
+        # 현재 end-effector 상태
+        ee_pos, ee_quat = self._robot.end_effector.get_world_pose()
+
+        # Delta를 적용한 타겟 위치/자세 계산
+        target_pos = ee_pos + action[:3]
+
+        # Delta rotation → 새 quaternion
+        current_euler = rot_utils.quats_to_euler_angles(ee_quat.reshape(1, 4))[0]
+        target_euler = current_euler + action[3:6]
+        target_quat = rot_utils.euler_angles_to_quats(target_euler.reshape(1, 3))[0]
+
+        # 작업 공간 제한
+        target_pos = np.clip(
+            target_pos,
+            [0.1, -0.4, 0.02],
+            [0.7, 0.4, 0.6],
+        )
+
+        # RMPFlow 컨트롤러로 IK 풀기
+        if not hasattr(self, "_rmpflow_controller"):
+            self._rmpflow_controller = RMPFlowController(
+                name="rmpflow_controller",
+                robot_articulation=self._robot,
+            )
+
+        joint_actions = self._rmpflow_controller.forward(
+            target_end_effector_position=target_pos,
+            target_end_effector_orientation=target_quat,
+        )
+        self._robot.apply_action(joint_actions)
+
+        # Gripper 제어
+        if action[6] > 0.5:
+            self._robot.gripper.set_joint_positions(
+                self._robot.gripper.joint_closed_positions
+            )
+        else:
+            self._robot.gripper.set_joint_positions(
+                self._robot.gripper.joint_opened_positions
+            )
+
+        # 시뮬레이션 스텝 진행
+        self._world.step(render=not self.headless)
+
     def step(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, float, bool, dict]:
         """
-        Gym-style step interface (for RL training).
+        Gym-style step interface.
 
         Returns:
             frame, proprioception, reward, done, info
         """
         self.execute_action(action)
 
-        if self._sim:
-            self._sim.step()
+        if not self._use_placeholder and self._world:
+            self._world.step(render=not self.headless)
 
         frame, proprio = self.get_observation()
 
-        # TODO: 작업별 보상 함수 정의
         reward = 0.0
         done = False
         info = {"step": 0}
+
+        # Pick-and-place 작업: 큐브와 그리퍼 거리로 보상 계산
+        if not self._use_placeholder and self._target_cube is not None:
+            cube_pos, _ = self._target_cube.get_world_pose()
+            ee_pos = proprio[:3]
+            dist = np.linalg.norm(ee_pos - cube_pos)
+            reward = -dist  # 거리가 가까울수록 높은 보상
 
         return frame, proprio, reward, done, info
 
     def close(self):
         """환경 종료."""
-        if self._sim:
-            self._sim.stop()
+        if self._sim_app is not None:
+            self._sim_app.close()
         logger.info("Environment closed")

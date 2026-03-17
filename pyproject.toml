@@ -1,0 +1,35 @@
+[project]
+name = "tracer"
+version = "0.1.0"
+description = "DVA (Direct Video-Action Model) Pipeline - Isaac Sim + Cosmos + IDM"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
+    "protobuf>=4.25.0",
+]
+
+[project.optional-dependencies]
+cosmos = [
+    # Install Cosmos Predict 2.5 from NVIDIA:
+    # https://github.com/NVIDIA/Cosmos
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+tracer-server = "server.cosmos_server:main"
+tracer-client = "client.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["client", "server", "models", "proto"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

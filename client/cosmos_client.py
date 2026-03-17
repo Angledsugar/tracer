@@ -12,8 +12,6 @@ import grpc
 import numpy as np
 from PIL import Image
 
-import sys
-sys.path.append("..")
 from proto import video_service_pb2
 from proto import video_service_pb2_grpc
 

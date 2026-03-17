@@ -11,10 +11,7 @@ from typing import Optional, Callable
 
 import numpy as np
 
-from cosmos_client import CosmosClient
-
-import sys
-sys.path.append("..")
+from client.cosmos_client import CosmosClient
 from models.inverse_dynamics import InverseDynamicsModel
 
 logger = logging.getLogger(__name__)
