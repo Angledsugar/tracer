@@ -46,6 +46,7 @@ def main():
         headless=args.headless,
     )
     env.initialize()
+    env.set_initial_prompt(args.language)
     env.reset()
 
     # 2. torch 및 모델 import (Isaac Sim 초기화 이후)
@@ -85,6 +86,7 @@ def main():
         language_instruction=args.language,
         idm_device=args.device,
         show_predicted_frames=env.show_predicted_frames,
+        get_language=env.get_current_prompt,
     )
 
     # 6. 실행

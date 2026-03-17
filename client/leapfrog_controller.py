@@ -68,6 +68,7 @@ class LeapfrogController:
         language_instruction: str = "",
         idm_device: str = "cuda:0",
         show_predicted_frames: Optional[Callable] = None,
+        get_language: Optional[Callable[[], str]] = None,
     ):
         """
         Args:
@@ -76,9 +77,10 @@ class LeapfrogController:
             config: Leapfrog configuration
             get_observation: Function returning (frame [H,W,3], proprioception [7])
             execute_action: Function to send action to robot
-            language_instruction: Task description
+            language_instruction: Task description (initial)
             idm_device: Device for IDM inference
             show_predicted_frames: Callback to display predicted frames in sim
+            get_language: Callback to get current language prompt (for live updates)
         """
         self.cosmos = cosmos_client
         self.idm = idm
@@ -88,6 +90,7 @@ class LeapfrogController:
         self.language = language_instruction
         self.idm_device = idm_device
         self.show_predicted_frames = show_predicted_frames
+        self._get_language = get_language
 
         self.state = ControlState()
         self.context_frames: list[np.ndarray] = []
@@ -95,18 +98,27 @@ class LeapfrogController:
         self._inference_thread: Optional[threading.Thread] = None
         self._last_predicted_frames: Optional[list[np.ndarray]] = None
 
+    def _get_current_language(self) -> str:
+        """최신 language prompt 반환 (UI에서 변경 가능)."""
+        if self._get_language:
+            prompt = self._get_language()
+            if prompt:
+                self.language = prompt
+        return self.language
+
     def _request_inference_async(self):
         """비동기로 Cosmos 추론 요청."""
         self.state.is_inferencing = True
 
         context = list(self.context_frames)  # snapshot
         prev_actions = list(self.state.previous_actions)
+        current_language = self._get_current_language()
 
         def _run():
             try:
                 generated_frames, latency_ms = self.cosmos.predict(
                     context_frames=context,
-                    language_instruction=self.language,
+                    language_instruction=current_language,
                     previous_actions=prev_actions,
                     num_output_frames=self.config.num_output_frames,
                     guidance_scale=self.config.guidance_scale,

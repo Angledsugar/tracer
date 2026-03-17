@@ -54,6 +54,8 @@ class IsaacSimEnv:
         self._prediction_provider = None
         self._camera_window = None
         self._camera_provider = None
+        self._prompt_window = None
+        self._current_prompt = ""
 
         # Placeholder state
         self._ee_pos = np.array([0.4, 0.0, 0.3])
@@ -140,11 +142,11 @@ class IsaacSimEnv:
             )
         )
 
-        # 카메라 설정 (로봇 어깨 뒤에서 바라보는 3인칭 시점)
+        # 카메라 설정: 로봇 베이스 기준 높이 2m, 45도 하향 뷰 (책상 전체 보임)
         h, w = self.camera_resolution
         self._camera = Camera(
             prim_path="/World/Camera",
-            position=np.array([1.0, 0.0, 1.0]),
+            position=np.array([1.9, 0.0, 2.0]),
             frequency=20,
             resolution=(w, h),
             orientation=rot_utils.euler_angles_to_quats(
@@ -167,6 +169,7 @@ class IsaacSimEnv:
         if not self.headless:
             self._init_prediction_display()
             self._init_camera_viewport()
+            self._init_prompt_input()
 
         self._initialized = True
         self._use_placeholder = False
@@ -184,6 +187,44 @@ class IsaacSimEnv:
                 logger.warning("No active viewport found")
         except Exception as e:
             logger.warning(f"Could not set viewport camera: {e}")
+
+    def _init_prompt_input(self):
+        """실시간 프롬프트 입력 UI 창 생성."""
+        try:
+            import omni.ui as ui
+
+            self._prompt_window = ui.Window(
+                "Language Prompt", width=400, height=120,
+            )
+            with self._prompt_window.frame:
+                with ui.VStack(spacing=5):
+                    ui.Label("Language Instruction (Enter to apply)", height=20)
+                    field = ui.StringField(height=30)
+                    field.model.set_value(self._current_prompt)
+                    self._prompt_label = ui.Label(
+                        f"Active: {self._current_prompt}", height=20,
+                        style={"color": 0xFF00FF00},
+                    )
+
+                    def _on_prompt_changed(model):
+                        new_prompt = model.get_value_as_string()
+                        self._current_prompt = new_prompt
+                        self._prompt_label.text = f"Active: {new_prompt}"
+                        logger.info(f"Prompt updated: {new_prompt}")
+
+                    field.model.add_end_edit_fn(_on_prompt_changed)
+
+            logger.info("Prompt input window created")
+        except Exception as e:
+            logger.warning(f"Could not create prompt input: {e}")
+
+    def set_initial_prompt(self, prompt: str):
+        """초기 프롬프트 설정."""
+        self._current_prompt = prompt
+
+    def get_current_prompt(self) -> str:
+        """현재 활성 프롬프트 반환. UI에서 변경된 값을 반환."""
+        return self._current_prompt
 
     def _init_prediction_display(self):
         """카메라 입력 + Cosmos 예측 프레임을 표시할 omni.ui 창 생성."""
