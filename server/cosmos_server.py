@@ -88,10 +88,21 @@ class CosmosModelWrapper:
             )
 
         logger.info(f"Using {pipeline_cls.__name__} from diffusers {diffusers.__version__}")
-        self.pipeline = pipeline_cls.from_pretrained(
-            self.model_path,
-            torch_dtype=torch.bfloat16,
-        )
+
+        # safety_checker (cosmos_guardrail) 없이 로드 시도
+        try:
+            self.pipeline = pipeline_cls.from_pretrained(
+                self.model_path,
+                torch_dtype=torch.bfloat16,
+            )
+        except Exception:
+            logger.warning("Loading without safety checker (cosmos_guardrail not installed)")
+            self.pipeline = pipeline_cls.from_pretrained(
+                self.model_path,
+                torch_dtype=torch.bfloat16,
+                safety_checker=None,
+            )
+
         self.pipeline.to(self.device)
         self.model = DiffusersCosmosModel(self.pipeline, self.device)
         logger.info("Cosmos model loaded (HuggingFace Diffusers)")
