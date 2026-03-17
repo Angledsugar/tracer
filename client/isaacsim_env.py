@@ -96,6 +96,21 @@ class IsaacSimEnv:
         self._world = World(stage_units_in_meters=1.0)
         self._world.scene.add_default_ground_plane()
 
+        # 조명 추가 (RasterOnly 렌더러에서는 조명이 없으면 검은 화면)
+        import omni.kit.commands
+        from pxr import UsdLux, Sdf
+
+        stage = self._world.stage
+
+        # Dome light (전체 환경 조명)
+        dome_light = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/DomeLight"))
+        dome_light.GetIntensityAttr().Set(1000.0)
+
+        # Distant light (방향 조명 - 태양광 역할)
+        distant_light = UsdLux.DistantLight.Define(stage, Sdf.Path("/World/DistantLight"))
+        distant_light.GetIntensityAttr().Set(3000.0)
+        distant_light.GetAngleAttr().Set(0.53)
+
         # Franka 로봇 추가
         self._robot = self._world.scene.add(
             Franka(prim_path="/World/Franka", name="franka")
