@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package dva;
+
+service CosmosVideoService {
+    // Single chunk prediction
+    rpc PredictVideo (PredictRequest) returns (PredictResponse);
+
+    // Streaming prediction for Leapfrog
+    rpc PredictVideoStream (PredictRequest) returns (stream FrameResponse);
+
+    // Health check
+    rpc HealthCheck (Empty) returns (HealthResponse);
+}
+
+message Empty {}
+
+message HealthResponse {
+    bool ready = 1;
+    string model_name = 2;
+    int32 gpu_memory_used_mb = 3;
+}
+
+message PredictRequest {
+    // Current observation frame(s) as compressed bytes (JPEG)
+    repeated bytes context_frames = 1;
+
+    // Language instruction
+    string language_instruction = 2;
+
+    // Previous actions for Leapfrog continuity [6DoF + gripper] per step
+    repeated Action previous_actions = 3;
+
+    // Inference parameters
+    int32 num_output_frames = 4;    // default: 12
+    float guidance_scale = 5;        // default: 7.0
+    int32 num_denoise_steps = 6;     // default: 35
+    int32 seed = 7;
+}
+
+message Action {
+    float dx = 1;
+    float dy = 2;
+    float dz = 3;
+    float drx = 4;   // roll
+    float dry = 5;   // pitch
+    float drz = 6;   // yaw
+    float gripper = 7;  // 0: open, 1: closed
+}
+
+message PredictResponse {
+    // Generated future frames as compressed bytes (JPEG)
+    repeated bytes generated_frames = 1;
+
+    // Generation metadata
+    float inference_time_ms = 2;
+}
+
+message FrameResponse {
+    // Single generated frame
+    bytes frame = 1;
+    int32 frame_index = 2;
+}
