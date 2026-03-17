@@ -73,8 +73,8 @@ def main():
     config = LeapfrogConfig(
         control_hz=args.control_hz,
         num_output_frames=12,
-        execute_frames=8,
-        overlap_frames=4,
+        execute_frames=5,   # 5프레임 실행 후 다음 추론 시작
+        overlap_frames=7,   # 7프레임(350ms) 여유 → cosmos+IDM 완료 대기
     )
 
     controller = LeapfrogController(
