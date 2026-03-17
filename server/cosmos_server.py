@@ -7,6 +7,7 @@ RTX 4090 서버에서 실행 - Action-Conditioned 비디오 생성 모델 서빙
 2. Placeholder 모델 (개발/테스트용, 의존성 없음)
 """
 
+import os
 import time
 import io
 import logging
@@ -249,8 +250,13 @@ class PlaceholderModel:
 class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
     """gRPC service implementation."""
 
-    def __init__(self, model: CosmosModelWrapper):
+    def __init__(self, model: CosmosModelWrapper, save_dir: str = ""):
         self.model = model
+        self._save_dir = save_dir
+        self._request_count = 0
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            logger.info(f"Saving predicted frames to: {save_dir}")
 
     def _decode_frames(self, frame_bytes_list: list[bytes]) -> list[np.ndarray]:
         """Decode JPEG bytes to numpy arrays."""
@@ -266,6 +272,28 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)
         return buf.getvalue()
+
+    def _save_frames(
+        self,
+        context_frames: list[np.ndarray],
+        generated_frames: list[np.ndarray],
+    ):
+        """Context 프레임과 생성된 프레임을 디스크에 저장."""
+        req_dir = os.path.join(self._save_dir, f"request_{self._request_count:06d}")
+        os.makedirs(req_dir, exist_ok=True)
+
+        # Context 프레임 저장 (마지막 프레임만)
+        if context_frames:
+            img = Image.fromarray(context_frames[-1])
+            img.save(os.path.join(req_dir, "context.jpg"), quality=95)
+
+        # 생성된 프레임 저장
+        for i, frame in enumerate(generated_frames):
+            img = Image.fromarray(frame)
+            img.save(os.path.join(req_dir, f"predicted_{i:03d}.jpg"), quality=95)
+
+        logger.info(f"Saved {len(generated_frames)} frames to {req_dir}")
+        self._request_count += 1
 
     def _parse_actions(self, proto_actions) -> list[dict]:
         """Convert proto Action messages to dicts."""
@@ -306,6 +334,10 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
             num_denoise_steps=steps,
             seed=seed,
         )
+
+        # 프레임 저장
+        if self._save_dir:
+            self._save_frames(context_frames, generated_frames)
 
         # Encode output
         encoded_frames = [self._encode_frame(f) for f in generated_frames]
@@ -358,6 +390,7 @@ def serve(
     port: int = 50051,
     max_workers: int = 4,
     device: str = "cuda:0",
+    save_dir: str = "",
 ):
     """Start the gRPC server."""
     logging.basicConfig(level=logging.INFO)
@@ -371,7 +404,7 @@ def serve(
         ],
     )
     video_service_pb2_grpc.add_CosmosVideoServiceServicer_to_server(
-        CosmosVideoServicer(model), server
+        CosmosVideoServicer(model, save_dir=save_dir), server
     )
     server.add_insecure_port(f"{host}:{port}")
     server.start()
@@ -388,9 +421,14 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--save-dir", type=str, default="",
+                        help="Directory to save predicted frames (empty = disabled)")
     args = parser.parse_args()
 
-    serve(model_path=args.model_path, host=args.host, port=args.port, device=args.device)
+    serve(
+        model_path=args.model_path, host=args.host, port=args.port,
+        device=args.device, save_dir=args.save_dir,
+    )
 
 
 if __name__ == "__main__":
