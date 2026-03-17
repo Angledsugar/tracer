@@ -53,9 +53,14 @@ tracer/
 
 ### 요구사항
 
-- Python >= 3.10
+- **Python 3.10** (cosmos-predict2의 flash-attn이 cp310 전용)
 - [uv](https://docs.astral.sh/uv/) (패키지 매니저)
-- CUDA 지원 GPU (IDM 추론 및 Cosmos 서버)
+- CUDA 지원 GPU
+
+| 구성요소 | 최소 GPU | VRAM |
+|----------|----------|------|
+| 클라이언트 (Isaac Sim) | RTX 4080 이상 (RT Core 필수) | 16GB |
+| 서버 (Cosmos) | RTX 4090 권장 | 24GB |
 
 ### 기본 설치
 
@@ -65,13 +70,36 @@ cd tracer
 uv sync
 ```
 
-### Isaac Sim (선택)
+### Isaac Sim 설치 (클라이언트)
 
-Isaac Sim은 NVIDIA Omniverse를 통해 별도로 설치합니다. 설치되지 않은 환경에서는 자동으로 placeholder 모드로 동작합니다.
+Python 3.10 환경에서 **Isaac Sim 4.5.0**을 pip으로 설치합니다.
 
-- [Isaac Sim 설치 가이드](https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_python.html)
+```bash
+uv pip install isaacsim[all]==4.5.0 --extra-index-url https://pypi.nvidia.com
+```
 
-### Cosmos 모델 (선택)
+실행 전 EULA 동의가 필요합니다:
+```bash
+export OMNI_KIT_ACCEPT_EULA=YES
+```
+
+**시스템 요구사항:**
+- GPU: RTX 4080 이상 (RT Core 필수, A100/H100 미지원)
+- RAM: 32GB 이상
+- OS: Ubuntu 22.04/24.04 또는 Windows 10/11
+- 저장공간: 50GB SSD 이상
+
+> Isaac Sim이 설치되지 않은 환경에서는 자동으로 placeholder 모드로 동작합니다.
+
+**Python 버전별 Isaac Sim 호환:**
+
+| Isaac Sim | Python | 비고 |
+|-----------|--------|------|
+| 4.5.0 | **3.10** | 현재 프로젝트와 호환 |
+| 5.1.0 | 3.11 | 안정 릴리스 (Python 변경 필요) |
+| 6.0.0 | 3.12 | Early Developer Release |
+
+### Cosmos 모델 설치 (서버)
 
 Cosmos Predict 2 모델은 두 가지 방법으로 사용할 수 있습니다:
 
@@ -85,7 +113,7 @@ uv pip install "cosmos-predict2[cu126]" --extra-index-url https://nvidia-cosmos.
 uv pip install diffusers transformers accelerate
 ```
 
-모델이 설치되지 않으면 서버는 placeholder 모드로 동작합니다.
+> 모델이 설치되지 않으면 서버는 placeholder 모드로 동작합니다.
 
 ## 실행
 
