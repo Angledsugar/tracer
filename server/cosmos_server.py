@@ -1,10 +1,10 @@
 """
-Cosmos Predict 2 gRPC Server
-RTX 4090 서버에서 실행 - Action-Conditioned 비디오 생성 모델 서빙
+Cosmos Predict 2.5 gRPC Server
+GPU 서버에서 실행 - Action-Conditioned 비디오 생성 모델 서빙
 
-두 가지 모드를 지원합니다:
-1. 실제 Cosmos 모델 (cosmos_predict2 패키지 필요)
-2. Placeholder 모델 (개발/테스트용, 의존성 없음)
+로딩 우선순위:
+1. Cosmos Predict 2.5 네이티브 (cosmos_predict2 + action_conditioned)
+2. Placeholder 모델 (개발/테스트용)
 """
 
 import os
@@ -26,86 +26,54 @@ logger = logging.getLogger(__name__)
 
 
 class CosmosModelWrapper:
-    """Cosmos Predict 2 action-conditioned model wrapper."""
+    """Cosmos Predict 2.5 action-conditioned model wrapper."""
 
-    def __init__(self, model_path: str, device: str = "cuda:0"):
+    def __init__(self, model_path: str, device: str = "cuda:0", cosmos25_repo: str = ""):
         self.device = device
         self.model = None
-        self.pipeline = None
         self.model_path = model_path
+        self.cosmos25_repo = cosmos25_repo
         self._load_model()
 
     def _load_model(self):
         """Load Cosmos action-conditioned model."""
         logger.info(f"Loading Cosmos model from {self.model_path}")
 
-        try:
-            self._load_cosmos_native()
-        except (ImportError, AttributeError) as e:
-            logger.warning(f"Native cosmos_predict2 failed: {e}")
+        if self.cosmos25_repo:
             try:
-                self._load_cosmos_diffusers()
-            except (ImportError, AttributeError) as e:
-                logger.warning(
-                    f"Diffusers also failed: {e}. "
-                    "Using placeholder model."
-                )
-                self.model = PlaceholderModel(self.device)
+                self._load_cosmos25()
+                return
+            except Exception as e:
+                logger.warning(f"Cosmos 2.5 loading failed: {e}")
 
-    def _load_cosmos_native(self):
-        """cosmos_predict2 네이티브 라이브러리로 모델 로드."""
-        from cosmos_predict2.pipelines.video2world import Video2WorldPipeline
-        from cosmos_predict2.configs.base.config_video2world import (
-            get_cosmos_predict2_video2world_pipeline,
+        logger.warning("Using placeholder model.")
+        self.model = PlaceholderModel(self.device)
+
+    def _load_cosmos25(self):
+        """Cosmos Predict 2.5 action-conditioned 모델 로드."""
+        import sys
+        # cosmos-predict2.5 저장소를 Python path에 추가
+        if self.cosmos25_repo and self.cosmos25_repo not in sys.path:
+            sys.path.insert(0, self.cosmos25_repo)
+
+        from cosmos_predict2.action_conditioned_config import (
+            ActionConditionedSetupArguments,
+        )
+        from cosmos_predict2.action_conditioned import inference as cosmos_inference
+
+        # Setup arguments 구성
+        setup_args = ActionConditionedSetupArguments(
+            output_dir="outputs/cosmos25_server",
+            checkpoint_dir=self.model_path if os.path.isdir(self.model_path) else "",
         )
 
-        config = get_cosmos_predict2_video2world_pipeline(model_size="2B")
-        self.pipeline = Video2WorldPipeline.from_config(
-            config=config,
-            dit_path=self.model_path,
+        self.model = Cosmos25Model(
+            setup_args=setup_args,
+            cosmos_inference_fn=cosmos_inference,
+            device=self.device,
+            cosmos25_repo=self.cosmos25_repo,
         )
-        self.model = NativeCosmosModel(self.pipeline, self.device)
-        logger.info("Cosmos model loaded (native cosmos_predict2)")
-
-    def _load_cosmos_diffusers(self):
-        """HuggingFace Diffusers로 모델 로드."""
-        import diffusers
-
-        # Diffusers 버전에 따라 클래스명이 다름
-        pipeline_cls = None
-        for cls_name in [
-            "Cosmos2VideoToWorldPipeline",
-            "CosmosVideoToWorldPipeline",
-        ]:
-            pipeline_cls = getattr(diffusers, cls_name, None)
-            if pipeline_cls is not None:
-                break
-
-        if pipeline_cls is None:
-            raise ImportError(
-                f"No Cosmos pipeline found in diffusers {diffusers.__version__}. "
-                "Try: uv pip install --upgrade diffusers"
-            )
-
-        logger.info(f"Using {pipeline_cls.__name__} from diffusers {diffusers.__version__}")
-
-        # safety_checker (cosmos_guardrail) 없이 로드 시도
-        try:
-            self.pipeline = pipeline_cls.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.bfloat16,
-            )
-        except Exception:
-            logger.warning("Loading without safety checker (cosmos_guardrail not installed)")
-            self.pipeline = pipeline_cls.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.bfloat16,
-                safety_checker=None,
-            )
-
-        self.pipeline.to(self.device)
-        self.model = DiffusersCosmosModel(self.pipeline, self.device)
-        logger.info("Cosmos model loaded (HuggingFace Diffusers)")
+        logger.info("Cosmos Predict 2.5 action-conditioned model loaded")
 
     def predict(
         self,
@@ -117,21 +85,6 @@ class CosmosModelWrapper:
         num_denoise_steps: int = 35,
         seed: int = 42,
     ) -> list[np.ndarray]:
-        """
-        Generate future video frames.
-
-        Args:
-            context_frames: List of RGB frames [H, W, 3] uint8
-            language: Task instruction
-            previous_actions: List of {dx,dy,dz,drx,dry,drz,gripper}
-            num_output_frames: Number of frames to generate
-            guidance_scale: Classifier-free guidance scale
-            num_denoise_steps: Number of denoising steps
-            seed: Random seed
-
-        Returns:
-            List of generated RGB frames [H, W, 3] uint8
-        """
         return self.model.predict(
             context_frames=context_frames,
             language=language,
@@ -143,18 +96,37 @@ class CosmosModelWrapper:
         )
 
     def get_gpu_memory_used(self) -> int:
-        """Get GPU memory usage in MB."""
         if torch.cuda.is_available():
             return torch.cuda.memory_allocated(self.device) // (1024 * 1024)
         return 0
 
 
-class NativeCosmosModel:
-    """cosmos_predict2 네이티브 라이브러리를 사용하는 모델."""
+class Cosmos25Model:
+    """Cosmos Predict 2.5 action-conditioned 모델.
 
-    def __init__(self, pipeline, device: str):
-        self.pipeline = pipeline
+    cosmos-predict2.5 저장소의 inference API를 직접 호출합니다.
+    """
+
+    def __init__(self, setup_args, cosmos_inference_fn, device: str, cosmos25_repo: str):
+        self.setup_args = setup_args
+        self.cosmos_inference_fn = cosmos_inference_fn
         self.device = device
+        self.cosmos25_repo = cosmos25_repo
+        self._pipeline = None
+
+    def _ensure_pipeline(self):
+        """Lazy loading: 첫 predict 호출 시 파이프라인 초기화."""
+        if self._pipeline is not None:
+            return
+
+        import sys
+        if self.cosmos25_repo and self.cosmos25_repo not in sys.path:
+            sys.path.insert(0, self.cosmos25_repo)
+
+        from cosmos_predict2._src.predict2.action.action_inference import Video2WorldCLI
+
+        self._pipeline = Video2WorldCLI(self.setup_args)
+        logger.info("Cosmos 2.5 pipeline initialized")
 
     def predict(
         self,
@@ -166,85 +138,90 @@ class NativeCosmosModel:
         num_denoise_steps: int,
         seed: int,
     ) -> list[np.ndarray]:
+        try:
+            self._ensure_pipeline()
+        except Exception as e:
+            logger.warning(f"Pipeline init failed ({e}), using simple fallback")
+            return self._fallback_predict(context_frames, num_output_frames, seed)
+
         # Action을 numpy 배열로 변환: (T, 7)
-        actions_array = None
+        actions_array = np.zeros((num_output_frames, 7), dtype=np.float32)
         if previous_actions:
-            actions_array = np.array([
-                [a["dx"], a["dy"], a["dz"], a["drx"], a["dry"], a["drz"], a["gripper"]]
-                for a in previous_actions
-            ])
+            for i, a in enumerate(previous_actions[:num_output_frames]):
+                actions_array[i] = [
+                    a["dx"], a["dy"], a["dz"],
+                    a["drx"], a["dry"], a["drz"],
+                    a["gripper"],
+                ]
 
-        # 마지막 context frame을 PIL Image로 변환
-        last_frame = Image.fromarray(context_frames[-1])
+        # Context frame 준비
+        if not context_frames:
+            return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
 
-        # 비디오 생성
-        video = self.pipeline(
-            input_path=last_frame,
-            prompt=language,
-            actions=actions_array,
-            num_frames=num_output_frames,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_denoise_steps,
-            seed=seed,
-        )
+        initial_frame = context_frames[-1]
 
-        # 출력을 numpy 프레임 리스트로 변환
+        try:
+            # Cosmos 2.5 generate
+            generated_video = self._pipeline.generate_vid2world(
+                conditioned_frames=initial_frame,
+                actions=actions_array,
+                guidance=guidance_scale,
+                num_steps=num_denoise_steps,
+                seed=seed,
+            )
+
+            # 출력을 프레임 리스트로 변환
+            return self._video_to_frames(generated_video, num_output_frames)
+
+        except Exception as e:
+            logger.error(f"Cosmos 2.5 inference failed: {e}")
+            return self._fallback_predict(context_frames, num_output_frames, seed)
+
+    def _video_to_frames(self, video, num_output_frames: int) -> list[np.ndarray]:
+        """비디오 텐서/배열을 프레임 리스트로 변환."""
         if isinstance(video, torch.Tensor):
-            # (T, C, H, W) → list of (H, W, 3) uint8
-            frames = []
-            for i in range(video.shape[0]):
-                frame = video[i].permute(1, 2, 0).cpu().numpy()
-                frame = np.clip(frame * 255, 0, 255).astype(np.uint8)
-                frames.append(frame)
-            return frames
+            video = video.cpu()
+            if video.ndim == 4:  # (T, C, H, W)
+                frames = []
+                for i in range(min(video.shape[0], num_output_frames)):
+                    frame = video[i].permute(1, 2, 0).numpy()
+                    if frame.max() <= 1.0:
+                        frame = (frame * 255).clip(0, 255)
+                    frames.append(frame.astype(np.uint8))
+                return frames
+            elif video.ndim == 5:  # (B, T, C, H, W)
+                return self._video_to_frames(video[0], num_output_frames)
 
-        # 이미 numpy 배열인 경우
         if isinstance(video, np.ndarray):
-            return [video[i] for i in range(video.shape[0])]
+            if video.ndim == 4:  # (T, H, W, C) or (T, C, H, W)
+                frames = []
+                for i in range(min(video.shape[0], num_output_frames)):
+                    frame = video[i]
+                    if frame.shape[0] == 3:  # (C, H, W) → (H, W, C)
+                        frame = np.transpose(frame, (1, 2, 0))
+                    if frame.max() <= 1.0:
+                        frame = (frame * 255).clip(0, 255)
+                    frames.append(frame.astype(np.uint8))
+                return frames
 
-        return video
+        if isinstance(video, list):
+            return [np.array(f).astype(np.uint8) for f in video[:num_output_frames]]
 
+        return self._fallback_predict([], num_output_frames, 42)
 
-class DiffusersCosmosModel:
-    """HuggingFace Diffusers를 사용하는 모델."""
-
-    def __init__(self, pipeline, device: str):
-        self.pipeline = pipeline
-        self.device = device
-
-    def predict(
-        self,
-        context_frames: list[np.ndarray],
-        language: str,
-        previous_actions: list[dict],
-        num_output_frames: int,
-        guidance_scale: float,
-        num_denoise_steps: int,
-        seed: int,
-    ) -> list[np.ndarray]:
-        # Context frame을 PIL Image로 변환
-        input_image = Image.fromarray(context_frames[-1])
-
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        output = self.pipeline(
-            image=input_image,
-            prompt=language,
-            negative_prompt="static with no motion, blurry, low quality",
-            num_inference_steps=num_denoise_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-        )
-
-        # frames[0]은 PIL Image 리스트
-        generated_frames = []
-        for frame in output.frames[0][:num_output_frames]:
-            if isinstance(frame, Image.Image):
-                generated_frames.append(np.array(frame))
-            else:
-                generated_frames.append(frame)
-
-        return generated_frames
+    def _fallback_predict(self, context_frames, num_output_frames, seed):
+        """파이프라인 실패 시 간단한 fallback."""
+        if not context_frames:
+            return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
+        rng = np.random.RandomState(seed)
+        last = context_frames[-1].copy()
+        frames = []
+        for _ in range(num_output_frames):
+            noise = rng.randint(-5, 5, last.shape, dtype=np.int16)
+            frame = np.clip(last.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+            frames.append(frame)
+            last = frame
+        return frames
 
 
 class PlaceholderModel:
@@ -256,7 +233,6 @@ class PlaceholderModel:
 
     def predict(self, context_frames, language, previous_actions,
                 num_output_frames, guidance_scale, num_denoise_steps, seed):
-        """Generate dummy future frames by slightly modifying the last context frame."""
         if not context_frames:
             return [np.zeros((256, 256, 3), dtype=np.uint8)] * num_output_frames
 
@@ -270,7 +246,6 @@ class PlaceholderModel:
             generated.append(frame)
             last_frame = frame
 
-        # Simulate inference time
         time.sleep(0.1)
         return generated
 
@@ -287,7 +262,6 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
             logger.info(f"Saving predicted frames to: {save_dir}")
 
     def _decode_frames(self, frame_bytes_list: list[bytes]) -> list[np.ndarray]:
-        """Decode JPEG bytes to numpy arrays."""
         frames = []
         for fb in frame_bytes_list:
             img = Image.open(io.BytesIO(fb))
@@ -295,36 +269,12 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
         return frames
 
     def _encode_frame(self, frame: np.ndarray) -> bytes:
-        """Encode numpy array to JPEG bytes."""
         img = Image.fromarray(frame)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)
         return buf.getvalue()
 
-    def _save_frames(
-        self,
-        context_frames: list[np.ndarray],
-        generated_frames: list[np.ndarray],
-    ):
-        """Context 프레임과 생성된 프레임을 디스크에 저장."""
-        req_dir = os.path.join(self._save_dir, f"request_{self._request_count:06d}")
-        os.makedirs(req_dir, exist_ok=True)
-
-        # Context 프레임 저장 (마지막 프레임만)
-        if context_frames:
-            img = Image.fromarray(context_frames[-1])
-            img.save(os.path.join(req_dir, "context.jpg"), quality=95)
-
-        # 생성된 프레임 저장
-        for i, frame in enumerate(generated_frames):
-            img = Image.fromarray(frame)
-            img.save(os.path.join(req_dir, f"predicted_{i:03d}.jpg"), quality=95)
-
-        logger.info(f"Saved {len(generated_frames)} frames to {req_dir}")
-        self._request_count += 1
-
     def _parse_actions(self, proto_actions) -> list[dict]:
-        """Convert proto Action messages to dicts."""
         return [
             {
                 "dx": a.dx, "dy": a.dy, "dz": a.dz,
@@ -334,11 +284,28 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
             for a in proto_actions
         ]
 
+    def _save_frames(
+        self,
+        context_frames: list[np.ndarray],
+        generated_frames: list[np.ndarray],
+    ):
+        req_dir = os.path.join(self._save_dir, f"request_{self._request_count:06d}")
+        os.makedirs(req_dir, exist_ok=True)
+
+        if context_frames:
+            img = Image.fromarray(context_frames[-1])
+            img.save(os.path.join(req_dir, "context.jpg"), quality=95)
+
+        for i, frame in enumerate(generated_frames):
+            img = Image.fromarray(frame)
+            img.save(os.path.join(req_dir, f"predicted_{i:03d}.jpg"), quality=95)
+
+        logger.info(f"Saved {len(generated_frames)} frames to {req_dir}")
+        self._request_count += 1
+
     def PredictVideo(self, request, context):
-        """Handle single prediction request."""
         start_time = time.time()
 
-        # Decode inputs
         context_frames = self._decode_frames(request.context_frames)
         previous_actions = self._parse_actions(request.previous_actions)
 
@@ -352,7 +319,6 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
             f"{num_output} output frames, guidance={guidance}, steps={steps}"
         )
 
-        # Run inference
         generated_frames = self.model.predict(
             context_frames=context_frames,
             language=request.language_instruction,
@@ -363,11 +329,9 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
             seed=seed,
         )
 
-        # 프레임 저장
         if self._save_dir:
             self._save_frames(context_frames, generated_frames)
 
-        # Encode output
         encoded_frames = [self._encode_frame(f) for f in generated_frames]
         elapsed_ms = (time.time() - start_time) * 1000
 
@@ -379,7 +343,6 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
         )
 
     def PredictVideoStream(self, request, context):
-        """Handle streaming prediction - send frames as they're generated."""
         context_frames = self._decode_frames(request.context_frames)
         previous_actions = self._parse_actions(request.previous_actions)
 
@@ -407,7 +370,7 @@ class CosmosVideoServicer(video_service_pb2_grpc.CosmosVideoServiceServicer):
     def HealthCheck(self, request, context):
         return video_service_pb2.HealthResponse(
             ready=True,
-            model_name="cosmos-predict2-2b-action-conditioned",
+            model_name="cosmos-predict2.5-action-conditioned",
             gpu_memory_used_mb=self.model.get_gpu_memory_used(),
         )
 
@@ -419,11 +382,14 @@ def serve(
     max_workers: int = 4,
     device: str = "cuda:0",
     save_dir: str = "",
+    cosmos25_repo: str = "",
 ):
     """Start the gRPC server."""
     logging.basicConfig(level=logging.INFO)
 
-    model = CosmosModelWrapper(model_path=model_path, device=device)
+    model = CosmosModelWrapper(
+        model_path=model_path, device=device, cosmos25_repo=cosmos25_repo,
+    )
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=max_workers),
         options=[
@@ -443,9 +409,11 @@ def serve(
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Cosmos Video Generation Server")
-    parser.add_argument("--model-path", type=str, required=True,
-                        help="Path to Cosmos model checkpoint or HuggingFace model ID")
+    parser = argparse.ArgumentParser(description="Cosmos Predict 2.5 Video Generation Server")
+    parser.add_argument("--model-path", type=str, default="",
+                        help="Checkpoint directory or HuggingFace model ID")
+    parser.add_argument("--cosmos25-repo", type=str, default="",
+                        help="Path to cosmos-predict2.5 repository (e.g. ~/ccy/cosmos-predict2.5)")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=50051)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -455,7 +423,7 @@ def main():
 
     serve(
         model_path=args.model_path, host=args.host, port=args.port,
-        device=args.device, save_dir=args.save_dir,
+        device=args.device, save_dir=args.save_dir, cosmos25_repo=args.cosmos25_repo,
     )
 
 
