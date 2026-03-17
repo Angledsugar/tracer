@@ -84,6 +84,7 @@ def main():
         execute_action=env.execute_action,
         language_instruction=args.language,
         idm_device=args.device,
+        show_predicted_frames=env.show_predicted_frames,
     )
 
     # 6. 실행

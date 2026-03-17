@@ -67,6 +67,7 @@ class LeapfrogController:
         execute_action: Callable[[np.ndarray], None],
         language_instruction: str = "",
         idm_device: str = "cuda:0",
+        show_predicted_frames: Optional[Callable] = None,
     ):
         """
         Args:
@@ -77,6 +78,7 @@ class LeapfrogController:
             execute_action: Function to send action to robot
             language_instruction: Task description
             idm_device: Device for IDM inference
+            show_predicted_frames: Callback to display predicted frames in sim
         """
         self.cosmos = cosmos_client
         self.idm = idm
@@ -85,11 +87,13 @@ class LeapfrogController:
         self.execute_action = execute_action
         self.language = language_instruction
         self.idm_device = idm_device
+        self.show_predicted_frames = show_predicted_frames
 
         self.state = ControlState()
         self.context_frames: list[np.ndarray] = []
         self._running = False
         self._inference_thread: Optional[threading.Thread] = None
+        self._last_predicted_frames: Optional[list[np.ndarray]] = None
 
     def _request_inference_async(self):
         """비동기로 Cosmos 추론 요청."""
@@ -139,6 +143,12 @@ class LeapfrogController:
     def _swap_actions(self):
         """새 추론 결과로 action 교체."""
         if self.state.pending_actions is not None:
+            # 예측 프레임 저장 및 표시
+            if self.state.pending_frames:
+                self._last_predicted_frames = self.state.pending_frames
+                if self.show_predicted_frames:
+                    self.show_predicted_frames(self._last_predicted_frames, frame_index=0)
+
             # 현재 실행 중인 action들을 이전 action으로 저장 (Leapfrog continuity)
             self.state.previous_actions = [
                 {
@@ -214,10 +224,16 @@ class LeapfrogController:
             if not self.state.is_inferencing and self.state.pending_actions:
                 self._swap_actions()
 
-            # 3. 현재 action 실행
+            # 3. 현재 action 실행 + 예측 프레임 업데이트
             if self.state.action_index < len(self.state.current_actions):
                 action = self.state.current_actions[self.state.action_index]
                 self.execute_action(action)
+                # 현재 실행 중인 프레임에 맞춰 예측 이미지 업데이트
+                if self.show_predicted_frames and self._last_predicted_frames:
+                    self.show_predicted_frames(
+                        self._last_predicted_frames,
+                        frame_index=self.state.action_index,
+                    )
                 self.state.action_index += 1
             else:
                 logger.warning("Action buffer empty - holding position")

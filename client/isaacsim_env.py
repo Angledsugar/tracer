@@ -13,6 +13,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# 큐브 초기 위치 (테이블 위)
+CUBE_SPAWN_POS = np.array([0.4, 0.1, 0.55])
+# 바닥 높이 임계값 (이 아래로 내려가면 리스폰)
+GROUND_THRESHOLD = 0.03
+
 
 class IsaacSimEnv:
     """
@@ -43,6 +48,10 @@ class IsaacSimEnv:
         self._target_cube = None
         self._initialized = False
         self._use_placeholder = False
+
+        # 예측 프레임 표시용
+        self._prediction_window = None
+        self._prediction_provider = None
 
         # Placeholder state
         self._ee_pos = np.array([0.4, 0.0, 0.3])
@@ -108,7 +117,7 @@ class IsaacSimEnv:
             DynamicCuboid(
                 prim_path="/World/TargetCube",
                 name="target_cube",
-                position=np.array([0.4, 0.1, 0.55]),
+                position=CUBE_SPAWN_POS.copy(),
                 scale=np.array([0.04, 0.04, 0.04]),
                 color=np.array([1.0, 0.0, 0.0]),
             )
@@ -137,9 +146,67 @@ class IsaacSimEnv:
         for _ in range(20):
             self._world.step(render=True)
 
+        # 예측 프레임 표시 창 생성 (headless가 아닌 경우)
+        if not self.headless:
+            self._init_prediction_display()
+
         self._initialized = True
         self._use_placeholder = False
         logger.info("Isaac Sim initialized successfully")
+
+    def _init_prediction_display(self):
+        """Cosmos 예측 프레임을 표시할 omni.ui 창 생성."""
+        try:
+            import omni.ui as ui
+
+            h, w = self.camera_resolution
+
+            self._prediction_window = ui.Window(
+                "Cosmos Prediction", width=w + 20, height=h + 40,
+            )
+            with self._prediction_window.frame:
+                with ui.VStack():
+                    ui.Label("Cosmos Predicted Frames", height=20)
+                    self._prediction_provider = ui.ByteImageProvider()
+                    self._prediction_provider.set_bytes_data(
+                        [0] * (w * h * 4), [w, h],
+                    )
+                    ui.ImageWithProvider(
+                        self._prediction_provider,
+                        width=w, height=h,
+                    )
+
+            logger.info("Prediction display window created")
+        except Exception as e:
+            logger.warning(f"Could not create prediction display: {e}")
+            self._prediction_window = None
+            self._prediction_provider = None
+
+    def show_predicted_frames(self, frames: list[np.ndarray], frame_index: int = 0):
+        """
+        Cosmos가 예측한 프레임을 Isaac Sim UI 창에 표시.
+
+        Args:
+            frames: Cosmos가 생성한 미래 프레임 리스트 [H, W, 3] uint8
+            frame_index: 표시할 프레임 인덱스
+        """
+        if self._prediction_provider is None or not frames:
+            return
+
+        try:
+            frame = frames[min(frame_index, len(frames) - 1)]
+            h, w = frame.shape[:2]
+
+            # RGB → RGBA (omni.ui는 RGBA를 요구)
+            rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            rgba[:, :, :3] = frame
+            rgba[:, :, 3] = 255
+
+            self._prediction_provider.set_bytes_data(
+                rgba.flatten().tolist(), [w, h],
+            )
+        except Exception as e:
+            logger.debug(f"Failed to update prediction display: {e}")
 
     def _init_placeholder(self):
         """Isaac Sim 없이 개발/테스트용 플레이스홀더."""
@@ -165,6 +232,8 @@ class IsaacSimEnv:
             self._robot.gripper.set_joint_positions(
                 self._robot.gripper.joint_opened_positions
             )
+            # 큐브 위치 리셋
+            self._respawn_cube()
             # 시뮬레이션 몇 스텝 진행하여 물리 안정화
             for _ in range(10):
                 self._world.step(render=False)
@@ -174,6 +243,29 @@ class IsaacSimEnv:
             self._gripper_state = 0.0
 
         return self.get_observation()
+
+    def _respawn_cube(self):
+        """큐브를 테이블 위 초기 위치로 리스폰."""
+        if self._target_cube is not None:
+            self._target_cube.set_world_pose(
+                position=CUBE_SPAWN_POS.copy(),
+                orientation=np.array([1.0, 0.0, 0.0, 0.0]),
+            )
+            self._target_cube.set_linear_velocity(np.zeros(3))
+            self._target_cube.set_angular_velocity(np.zeros(3))
+            logger.info("Cube respawned on table")
+
+    def _check_cube_fallen(self):
+        """큐브가 바닥에 닿았는지 확인하고, 닿았으면 리스폰."""
+        if self._use_placeholder or self._target_cube is None:
+            return
+
+        cube_pos, _ = self._target_cube.get_world_pose()
+        if cube_pos[2] < GROUND_THRESHOLD:
+            logger.info(
+                f"Cube fell to ground (z={cube_pos[2]:.3f}), respawning..."
+            )
+            self._respawn_cube()
 
     def get_observation(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -267,6 +359,8 @@ class IsaacSimEnv:
         """
         if not self._use_placeholder:
             self._execute_action_isaac(action)
+            # 매 액션 실행 후 큐브가 떨어졌는지 확인
+            self._check_cube_fallen()
             return
 
         # Placeholder: 직접 상태 업데이트
